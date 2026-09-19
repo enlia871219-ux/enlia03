@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-09-20-IMGDEBUG-01"
+BUILD_ID = "2026-09-20-IMGDEBUG-02"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -278,6 +278,7 @@ def screen_region_to_client(region, hwnd):
 
 
 def find_image_background(path, accuracy, region, hwnd):
+    """Find a template in the target window, tolerating DPI/render scaling."""
     template=cv_image(path)
     if template is None: return None
     screen=grab_window(hwnd)
@@ -287,12 +288,28 @@ def find_image_background(path, accuracy, region, hwnd):
         x,y,w,h=map(int,region); x=max(0,x); y=max(0,y); w=min(w,screen.shape[1]-x); h=min(h,screen.shape[0]-y)
         if w<=0 or h<=0: return None
         screen=screen[y:y+h,x:x+w]; ox,oy=x,y
-    if screen.shape[0]<template.shape[0] or screen.shape[1]<template.shape[1]: return None
-    gs=cv2.cvtColor(screen,cv2.COLOR_BGR2GRAY); gt=cv2.cvtColor(template,cv2.COLOR_BGR2GRAY)
-    result=cv2.matchTemplate(gs,gt,cv2.TM_CCOEFF_NORMED); _,score,_,loc=cv2.minMaxLoc(result)
+    if screen.shape[0] < 8 or screen.shape[1] < 8: return None
+
+    # First try the original size, then a range of common Windows/game DPI scales.
+    # This is important when the macro image was captured at a different UI scale
+    # than the current game window.
+    gs=cv2.cvtColor(screen,cv2.COLOR_BGR2GRAY)
+    gt0=cv2.cvtColor(template,cv2.COLOR_BGR2GRAY)
+    best=(-1.0, 1.0, 0, 0, template.shape[1], template.shape[0])
+    scales=(0.70,0.75,0.80,0.85,0.90,0.95,1.00,1.05,1.10,1.15,1.20,1.25,1.30)
+    for scale in scales:
+        tw=max(8,int(round(gt0.shape[1]*scale)))
+        th=max(8,int(round(gt0.shape[0]*scale)))
+        if tw>gs.shape[1] or th>gs.shape[0]: continue
+        gt=cv2.resize(gt0,(tw,th),interpolation=cv2.INTER_AREA if scale<1.0 else cv2.INTER_CUBIC)
+        result=cv2.matchTemplate(gs,gt,cv2.TM_CCOEFF_NORMED)
+        _,score,_,loc=cv2.minMaxLoc(result)
+        if score>best[0]:
+            best=(float(score),float(scale),int(loc[0]),int(loc[1]),tw,th)
+
+    score,scale,x,y,ww,hh=best
     if score<accuracy:return None
-    hh,ww=template.shape[:2]
-    return score, loc[0]+ox, loc[1]+oy, ww, hh
+    return score, x+ox, y+oy, ww, hh
 
 @dataclass
 class Step:
