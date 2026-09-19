@@ -1375,34 +1375,45 @@ class MainWindow(QMainWindow):
             self.runlog(f"[{now()}] 재생 시작 실패: 재생할 매크로가 없습니다.")
             QMessageBox.information(self,'재생','재생할 매크로가 없습니다.')
             return
-        settings=self.settings()
-        selected_hwnd=int(getattr(self,'_last_target_hwnd',0) or 0)
-        self.runlog(f"[{now()}] 재생 설정 확인: 단계={len(self.steps)}, 백그라운드={settings.get('background')}, 선택HWND={selected_hwnd}, 대상창={settings.get('target_title')} [{settings.get('target_process')}]")
-        if settings.get('background'):
-            # The explicitly selected HWND is the single source of truth.
-            # Never replace it with the foreground window or the macro app HWND.
-            hwnd=selected_hwnd
-            title_filter=settings.get('target_title','')
-            proc_filter=settings.get('target_process','')
-            if not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
-                hwnd=find_window_by_title(title_filter, proc_filter)
-            elif not _window_matches(hwnd, title_filter, proc_filter):
-                self.runlog(f'[{now()}] 선택 HWND 검증 불일치: HWND={hwnd} → 제목/프로세스로 재탐색')
-                hwnd=find_window_by_title(title_filter, proc_filter)
-            if not hwnd:
-                self._set_target_status(False, '✗ 대상 창을 찾지 못했습니다.')
-                self.runlog(f'[{now()}] 백그라운드 재생 시작 실패: 대상 HWND가 없습니다.')
-                QMessageBox.warning(self,'백그라운드 재생','선택된 대상 창을 찾지 못했습니다.\n\n창 선택에서 대상 창을 다시 선택해주세요.')
-                return
-            hwnd=int(hwnd)
-            self._last_target_hwnd=hwnd
-            settings['target_hwnd']=hwnd
-            title=self.foreground_window_title_for(hwnd); proc=window_process_name(hwnd)
-            self.target_title.setText(title)
-            self.target_process.setText(proc)
-            self._set_target_status(True, f'✓ 재생 대상 확인: {title}  [{proc or "프로세스명 읽기 실패"}]')
-            self.runlog(f'[{now()}] 재생 대상 고정: HWND={hwnd}, 창={title}, 프로세스={proc}')
-            self.log_event(f'[{now()}] 재생 대상 확인: HWND={hwnd}, 창={title}, 프로세스={proc}')
+        # Settings/target validation used to sit outside the startup try/except.
+        # If a loaded chain contains an unexpected value, the GUI thread could
+        # terminate without showing why. Keep all existing behavior, but surface
+        # any Python exception from this early startup section instead.
+        try:
+            settings=self.settings()
+            selected_hwnd=int(getattr(self,'_last_target_hwnd',0) or 0)
+            self.runlog(f"[{now()}] 재생 설정 확인: 단계={len(self.steps)}, 백그라운드={settings.get('background')}, 선택HWND={selected_hwnd}, 대상창={settings.get('target_title')} [{settings.get('target_process')}]")
+            if settings.get('background'):
+                # The explicitly selected HWND is the single source of truth.
+                # Never replace it with the foreground window or the macro app HWND.
+                hwnd=selected_hwnd
+                title_filter=settings.get('target_title','')
+                proc_filter=settings.get('target_process','')
+                if not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
+                    hwnd=find_window_by_title(title_filter, proc_filter)
+                elif not _window_matches(hwnd, title_filter, proc_filter):
+                    self.runlog(f'[{now()}] 선택 HWND 검증 불일치: HWND={hwnd} → 제목/프로세스로 재탐색')
+                    hwnd=find_window_by_title(title_filter, proc_filter)
+                if not hwnd:
+                    self._set_target_status(False, '✗ 대상 창을 찾지 못했습니다.')
+                    self.runlog(f'[{now()}] 백그라운드 재생 시작 실패: 대상 HWND가 없습니다.')
+                    QMessageBox.warning(self,'백그라운드 재생','선택된 대상 창을 찾지 못했습니다.\n\n창 선택에서 대상 창을 다시 선택해주세요.')
+                    return
+                hwnd=int(hwnd)
+                self._last_target_hwnd=hwnd
+                settings['target_hwnd']=hwnd
+                title=self.foreground_window_title_for(hwnd); proc=window_process_name(hwnd)
+                self.target_title.setText(title)
+                self.target_process.setText(proc)
+                self._set_target_status(True, f'✓ 재생 대상 확인: {title}  [{proc or "프로세스명 읽기 실패"}]')
+                self.runlog(f'[{now()}] 재생 대상 고정: HWND={hwnd}, 창={title}, 프로세스={proc}')
+                self.log_event(f'[{now()}] 재생 대상 확인: HWND={hwnd}, 창={title}, 프로세스={proc}')
+        except Exception as e:
+            self.playing=False
+            self.runlog(f'[{now()}] 재생 시작 초기화 예외: {type(e).__name__}: {e}')
+            self.update_button_states()
+            QMessageBox.critical(self,'재생 시작 오류',f'재생 시작 초기화 중 오류가 발생했습니다.\n\n{type(e).__name__}: {e}')
+            return
         try:
             # Keep the QObject alive explicitly for the entire worker lifetime.
             self._worker_signals=Signals()
