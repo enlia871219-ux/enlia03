@@ -159,6 +159,9 @@ def background_click(hwnd, x, y):
     user32=ctypes.windll.user32
     x=int(x); y=int(y)
     lparam=(y << 16) | (x & 0xFFFF)
+    # Send a move first; some window procedures only accept clicks after
+    # receiving a mouse-position update.
+    user32.PostMessageW(hwnd, 0x0200, 0, lparam)  # WM_MOUSEMOVE
     ok_down=bool(user32.PostMessageW(hwnd, 0x0201, 0x0001, lparam))
     ok_up=bool(user32.PostMessageW(hwnd, 0x0202, 0x0000, lparam))
     if ok_down and ok_up:
@@ -225,6 +228,15 @@ def grab_window(hwnd):
         return cv2.cvtColor(shot,cv2.COLOR_BGRA2BGR)
     except Exception:
         return None
+
+
+def screen_region_to_client(region, hwnd):
+    """Convert a region selected on the desktop to target-window client coordinates."""
+    if not region or len(region) < 4 or int(region[2]) <= 0 or not hwnd:
+        return [0, 0, 0, 0]
+    ox, oy = window_client_origin(hwnd)
+    x, y, w, h = map(int, region)
+    return [x - ox, y - oy, w, h]
 
 
 def find_image_background(path, accuracy, region, hwnd):
@@ -581,11 +593,14 @@ class MacroWorker(threading.Thread):
                                 while not self.pause_evt.is_set() and not self.stop_evt.is_set(): time.sleep(.05)
                                 if self.background:
                                     if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
-                                    found=find_image_background(st.path, st.accuracy, st.region, self.target_hwnd) if self.target_hwnd else None
-                                    if found is None and self.target_hwnd:
-                                        self.sig.run.emit(f"[{now()}] 이미지 검색 실패: 캡처/템플릿 매칭 결과 없음 (정확도 기준 {st.accuracy:.2f})")
+                                    if self.target_hwnd:
+                                        client_region=screen_region_to_client(st.region, self.target_hwnd)
+                                        found=find_image_background(st.path, st.accuracy, client_region, self.target_hwnd)
+                                    else:
+                                        client_region=[0,0,0,0]
+                                        found=None
                                     if found is None and attempts == 0 and time.monotonic() + 0.1 >= deadline:
-                                        self.sig.run.emit(f"[{now()}] 이미지 검색: 대상 창 캡처/인식 결과 없음")
+                                        self.sig.run.emit(f"[{now()}] 이미지 인식 실패: 대상 창 캡처 또는 정확도 미달 (기준 {st.accuracy:.2f}, 검색영역={client_region})")
                                 else:
                                     found=find_image(st.path, st.accuracy, st.region)
                                 if found: break
@@ -614,10 +629,14 @@ class MacroWorker(threading.Thread):
                             if st.click_mode=='offset': cx=x+st.click_x; cy=y+st.click_y
                             if self.background:
                                 if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
-                                if not background_click(self.target_hwnd, cx, cy): self.sig.run.emit(f"[{now()}] 백그라운드 이미지 클릭 실패")
+                                clicked=background_click(self.target_hwnd, cx, cy)
+                                if clicked:
+                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 클릭 ({cx},{cy})")
+                                else:
+                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 클릭 실패 ({cx},{cy})")
                             else:
                                 self.mouse.position=(cx,cy); self.mouse.click(mouse.Button.left)
-                            self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 클릭 ({cx},{cy})")
+                                self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 클릭 ({cx},{cy})")
                     self._wait(st.wait)
                     i = next_i
                 count+=1
