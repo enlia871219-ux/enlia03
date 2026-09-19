@@ -154,9 +154,10 @@ def window_client_origin(hwnd):
 
 
 def background_click(hwnd, x, y):
-    """Send a synchronous Win32 mouse click to the target/child window.
-    PostMessage returning True only means the message was queued; it does not
-    mean the game processed it, so synchronous SendMessage is attempted first."""
+    """Try Win32 messages first, then perform a real foreground mouse click.
+    Unity/Mabinogi Mobile may ignore synthetic WM_LBUTTON messages, so the
+    fallback temporarily activates the selected target, injects a real click,
+    and restores the previous foreground window."""
     if os.name != 'nt' or not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
         return False
     user32=ctypes.windll.user32
@@ -172,55 +173,98 @@ def background_click(hwnd, x, y):
 
     def send_click(target, tx, ty):
         lp=(int(ty) << 16) | (int(tx) & 0xFFFF)
-        # Tell the window which client position the mouse is over, then send
-        # the button messages synchronously. This is different from merely
-        # queueing PostMessage calls.
         try:
             user32.SendMessageW(target, WM_MOUSEACTIVATE, int(hwnd), 0)
             user32.SendMessageW(target, WM_MOUSEMOVE, 0, lp)
-            down=user32.SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp)
-            up=user32.SendMessageW(target, WM_LBUTTONUP, 0, lp)
-            return True, int(down), int(up)
+            user32.SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp)
+            user32.SendMessageW(target, WM_LBUTTONUP, 0, lp)
+            return True
         except Exception:
-            return False, 0, 0
+            return False
 
-    # If the top-level window has a child at this point, send to the deepest
-    # child because many game launchers/render hosts receive mouse messages
-    # there instead of on the top-level HWND.
-    target=hwnd
-    tx,ty=x,y
+    # Try the selected top-level window first. For normal Win32 controls this
+    # is enough and does not move the real cursor.
+    if send_click(hwnd, x, y):
+        # Do not trust SendMessage's return value as proof that the game used
+        # the input. Unity can consume/ignore these messages silently.
+        pass
+
+    # Mabinogi Mobile/Unity can use raw/engine input instead of WM_LBUTTON*.
+    # In that case a real injected mouse click is required. Temporarily bring
+    # the selected window to the foreground, click its client coordinate, then
+    # restore whatever window was active before the macro click.
     try:
-        pt=ctypes.wintypes.POINT(x,y)
-        child=user32.ChildWindowFromPointEx(hwnd, pt, 0)
-        if child and int(child) != int(hwnd):
-            cpt=ctypes.wintypes.POINT(x,y)
-            user32.ScreenToClient(child, ctypes.byref(cpt)) if False else None
-            # ChildWindowFromPointEx returns coordinates relative to the parent.
-            # Convert the point to the child's client coordinates.
-            if user32.ClientToScreen(hwnd, ctypes.byref(cpt)):
-                user32.ScreenToClient(child, ctypes.byref(cpt))
-                target=int(child); tx,ty=int(cpt.x),int(cpt.y)
+        if user32.IsIconic(hwnd):
+            return False
+
+        old_fg=int(user32.GetForegroundWindow())
+        target=int(hwnd)
+
+        # Bring the exact selected window forward without changing the stored
+        # target HWND. Allow Windows a short moment to switch input focus.
+        user32.ShowWindow(target, 9)  # SW_RESTORE
+        user32.SetForegroundWindow(target)
+        time.sleep(0.04)
+
+        # Convert the image-match client coordinate to screen coordinates.
+        pt=ctypes.wintypes.POINT(x, y)
+        if not user32.ClientToScreen(target, ctypes.byref(pt)):
+            if old_fg and user32.IsWindow(old_fg):
+                user32.SetForegroundWindow(old_fg)
+            return False
+
+        # Move/click using SendInput. This is real Windows mouse input and is
+        # therefore visible to Unity/raw-input paths that ignore WM messages.
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_=[
+                ('dx',ctypes.wintypes.LONG),
+                ('dy',ctypes.wintypes.LONG),
+                ('mouseData',ctypes.wintypes.DWORD),
+                ('dwFlags',ctypes.wintypes.DWORD),
+                ('time',ctypes.wintypes.DWORD),
+                ('dwExtraInfo',ctypes.POINTER(ctypes.wintypes.ULONG)),
+            ]
+        class INPUT(ctypes.Structure):
+            _fields_=[
+                ('type',ctypes.wintypes.DWORD),
+                ('mi',MOUSEINPUT),
+            ]
+
+        INPUT_MOUSE=0
+        MOUSEEVENTF_MOVE=0x0001
+        MOUSEEVENTF_ABSOLUTE=0x8000
+        MOUSEEVENTF_LEFTDOWN=0x0002
+        MOUSEEVENTF_LEFTUP=0x0004
+        SM_CXSCREEN=0
+        SM_CYSCREEN=1
+        sw=max(1,int(user32.GetSystemMetrics(SM_CXSCREEN)))
+        sh=max(1,int(user32.GetSystemMetrics(SM_CYSCREEN)))
+        ax=clamp(round(pt.x*65535/(sw-1)),0,65535)
+        ay=clamp(round(pt.y*65535/(sh-1)),0,65535)
+
+        extra=ctypes.wintypes.ULONG(0)
+        inputs=(INPUT*3)()
+        inputs[0].type=INPUT_MOUSE
+        inputs[0].mi=MOUSEINPUT(ax,ay,0,MOUSEEVENTF_MOVE|MOUSEEVENTF_ABSOLUTE,0,ctypes.pointer(extra))
+        inputs[1].type=INPUT_MOUSE
+        inputs[1].mi=MOUSEINPUT(0,0,0,MOUSEEVENTF_LEFTDOWN,0,ctypes.pointer(extra))
+        inputs[2].type=INPUT_MOUSE
+        inputs[2].mi=MOUSEINPUT(0,0,0,MOUSEEVENTF_LEFTUP,0,ctypes.pointer(extra))
+        sent=user32.SendInput(3, ctypes.byref(inputs), ctypes.sizeof(INPUT))
+        time.sleep(0.03)
+
+        # Put the user's previously active window back. If there was no
+        # previous window, simply leave the target active.
+        if old_fg and old_fg != target and user32.IsWindow(old_fg):
+            user32.SetForegroundWindow(old_fg)
+
+        return int(sent) == 3
     except Exception:
-        target=hwnd; tx,ty=x,y
-
-    ok,down,up=send_click(target,tx,ty)
-    if ok:
-        return True
-
-    # Fallback to the top-level HWND if the child path failed.
-    ok,down,up=send_click(hwnd,x,y)
-    if ok:
-        return True
-
-    # Last fallback: queue the messages for applications that only process
-    # mouse input from their message queue.
-    try:
-        lp=(y << 16) | (x & 0xFFFF)
-        user32.PostMessageW(hwnd, WM_MOUSEMOVE, 0, lp)
-        user32.PostMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp)
-        user32.PostMessageW(hwnd, WM_LBUTTONUP, 0, lp)
-        return True
-    except Exception:
+        try:
+            if old_fg and old_fg != int(hwnd) and user32.IsWindow(old_fg):
+                user32.SetForegroundWindow(old_fg)
+        except Exception:
+            pass
         return False
 
 def grab_window(hwnd):
