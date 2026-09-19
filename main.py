@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-09-20-CURSORFREE-09-SYNTHETIC-TOUCH"
+BUILD_ID = "2026-09-20-CURSORFREE-09-SYNTHETIC-TOUCH-FIX02"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -711,7 +711,10 @@ class MacroWorker(threading.Thread):
         self.advance_evt.set()
     def _wait(self, sec):
         end=time.monotonic()+max(0,sec/max(.1,float(self.settings['speed'])))
-        while time.monotonic()<end and not self.stop_evt.is_set():            if not self.pause_evt.is_set(): time.sleep(.05); continue
+        while time.monotonic()<end and not self.stop_evt.is_set():
+            if not self.pause_evt.is_set():
+                time.sleep(.05)
+                continue
             time.sleep(.02)
     def run(self):
         mode=self.settings['mode']; repeat=self.settings['repeat']; until=time.monotonic()+self.settings['minutes']*60 if mode=='time' else None; count=0
@@ -910,7 +913,9 @@ class MainWindow(QMainWindow):
                 elif key==keyboard.Key.f2: self.stop_record()
                 elif key==keyboard.Key.f3: self.start_play()
                 elif key==keyboard.Key.f4: self.stop_play()
-                elif key==keyboard.Key.f5: self.toggle_pause()            except Exception: pass
+                elif key==keyboard.Key.f5: self.toggle_pause()
+            except Exception:
+                pass
         self.hotkey_listener=keyboard.Listener(on_press=on_press); self.hotkey_listener.daemon=True; self.hotkey_listener.start()
     def apply_style(self):
         self.setStyleSheet('''
