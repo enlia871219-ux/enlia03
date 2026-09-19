@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-09-20-IMGDEBUG-08"
+BUILD_ID = "2026-09-20-IMGDEBUG-08-SAFE"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -154,80 +154,45 @@ def window_client_origin(hwnd):
 
 
 def background_click(hwnd, x, y):
-    """Send a click to the target/child HWND without moving or activating the real cursor/window."""
+    """Send background click messages without changing the real cursor or foreground window.
+    This version deliberately uses only the proven basic mouse messages; no
+    WM_NCHITTEST/WM_SETCURSOR calls are made because some Unity window
+    procedures can react badly to synthetic cursor-state messages.
+    """
     if os.name != 'nt' or not hwnd:
         return False
-    user32=ctypes.windll.user32
-    hwnd=int(hwnd)
-    if not user32.IsWindow(hwnd):
-        return False
-    x=int(x); y=int(y)
-    if x < 0 or y < 0:
-        return False
-
-    WM_MOUSEMOVE=0x0200
-    WM_LBUTTONDOWN=0x0201
-    WM_LBUTTONUP=0x0202
-    WM_SETCURSOR=0x0020
-    WM_NCHITTEST=0x0084
-    HTCLIENT=1
-    MK_LBUTTON=0x0001
-
-    def pack_xy(px, py):
-        return ((int(py) & 0xFFFF) << 16) | (int(px) & 0xFFFF)
-
-    def client_to_screen(target, px, py):
-        pt=ctypes.wintypes.POINT(int(px), int(py))
-        if not user32.ClientToScreen(int(target), ctypes.byref(pt)):
-            return None
-        return int(pt.x), int(pt.y)
-
-    def dispatch(target, tx, ty, screen_xy):
-        """Try the Win32 mouse-message path only; never changes foreground/cursor state."""
-        lp=pack_xy(tx, ty)
-        sx, sy=screen_xy
-        slp=pack_xy(sx, sy)
-        try:
-            # Give Unity the same message sequence Windows normally uses when
-            # the pointer is over a client area, but provide all coordinates
-            # explicitly in the messages. No SetCursorPos/SendInput/focus APIs.
-            user32.SendMessageW(target, WM_NCHITTEST, 0, slp)
-            user32.SendMessageW(target, WM_SETCURSOR, int(target), (HTCLIENT & 0xFFFF) | (WM_MOUSEMOVE << 16))
-            user32.SendMessageW(target, WM_MOUSEMOVE, 0, lp)
-            user32.SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp)
-            user32.SendMessageW(target, WM_LBUTTONUP, 0, lp)
-            # Also queue the same click once; some Unity/window procedures
-            # consume posted mouse messages on their own message pump.
-            user32.PostMessageW(target, WM_MOUSEMOVE, 0, lp)
-            user32.PostMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp)
-            user32.PostMessageW(target, WM_LBUTTONUP, 0, lp)
-            return True
-        except Exception:
+    try:
+        user32=ctypes.windll.user32
+        hwnd=int(hwnd)
+        x=int(x); y=int(y)
+        if not user32.IsWindow(hwnd) or x < 0 or y < 0:
             return False
 
-    # Try the explicitly selected top-level HWND first.
-    screen=client_to_screen(hwnd, x, y)
-    if screen is not None and dispatch(hwnd, x, y, screen):
+        WM_MOUSEMOVE=0x0200
+        WM_LBUTTONDOWN=0x0201
+        WM_LBUTTONUP=0x0202
+        MK_LBUTTON=0x0001
+
+        def pack_xy(px, py):
+            return ((int(py) & 0xFFFF) << 16) | (int(px) & 0xFFFF)
+
+        lp=pack_xy(x, y)
+
+        # Do not call SetCursorPos, SendInput, SetForegroundWindow, or
+        # any cursor/activation API. The physical pointer remains untouched.
+        user32.SendMessageW(hwnd, WM_MOUSEMOVE, 0, lp)
+        user32.SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp)
+        user32.SendMessageW(hwnd, WM_LBUTTONUP, 0, lp)
+
+        # Queue the same basic sequence as a second delivery path. This is
+        # harmless for normal Win32 windows and gives Unity's message pump
+        # another opportunity to consume the event.
+        user32.PostMessageW(hwnd, WM_MOUSEMOVE, 0, lp)
+        user32.PostMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp)
+        user32.PostMessageW(hwnd, WM_LBUTTONUP, 0, lp)
         return True
-
-    # Then locate the deepest child window at the requested client point.
-    # This does not activate the child or move the physical pointer.
-    try:
-        child=user32.ChildWindowFromPointEx(
-            hwnd, ctypes.wintypes.POINT(x, y), 0
-        )
     except Exception:
-        child=0
-    if child and int(child) != hwnd:
-        child=int(child)
-        screen=client_to_screen(hwnd, x, y)
-        if screen is not None:
-            child_pt=ctypes.wintypes.POINT(screen[0], screen[1])
-            if user32.ScreenToClient(child, ctypes.byref(child_pt)):
-                if dispatch(child, int(child_pt.x), int(child_pt.y), screen):
-                    return True
-
-    return False
+        return False
 
 def grab_window(hwnd):
     """Capture the client area with PrintWindow, then fall back to MSS for GPU-rendered windows."""
