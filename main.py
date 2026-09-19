@@ -762,7 +762,8 @@ class MacroWorker(threading.Thread):
                     self._wait(st.wait)
                     i = next_i
                 count+=1
-                self.sig.run.emit(f"[{now()}] 반복 {count}회 완료")                if self.stop_evt.is_set(): break
+                self.sig.run.emit(f"[{now()}] 반복 {count}회 완료")
+                if self.stop_evt.is_set(): break
                 self._wait(self.settings['cycle_wait'])
         except Exception as e:
             self.sig.run.emit(f"[{now()}] 오류: {e}")
