@@ -7,7 +7,7 @@ This is a desktop macro utility prototype. Use only where automation is permitte
 from __future__ import annotations
 
 import json, os, sys, time, threading, hashlib, shutil, ctypes, ctypes.wintypes
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, fields as dataclass_fields
 from datetime import datetime
 from pathlib import Path
 
@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-09-20-IMGDEBUG-05"
+BUILD_ID = "2026-09-20-IMGDEBUG-06"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -154,9 +154,11 @@ def window_client_origin(hwnd):
 
 
 def background_click(hwnd, x, y):
-    """Dispatch a click to the selected window without activating it.
-    This intentionally never uses SetForegroundWindow/SendInput: the macro
-    must remain a true background macro even when another window is on top."""
+    """Send background mouse messages without activating the target window.
+
+    This deliberately never calls SetForegroundWindow, SetCursorPos, or
+    SendInput. The requested client coordinates are carried in lParam.
+    """
     if os.name != 'nt' or not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
         return False
     user32=ctypes.windll.user32
@@ -167,49 +169,17 @@ def background_click(hwnd, x, y):
     WM_MOUSEMOVE=0x0200
     WM_LBUTTONDOWN=0x0201
     WM_LBUTTONUP=0x0202
-    WM_MOUSEACTIVATE=0x0021
     MK_LBUTTON=0x0001
 
-    def client_point(target, screen_x, screen_y):
-        p=ctypes.wintypes.POINT(int(screen_x),int(screen_y))
-        if user32.ScreenToClient(target,ctypes.byref(p)):
-            return int(p.x),int(p.y)
-        return None
+    def pack_xy(px,py):
+        return ((int(py) & 0xFFFF) << 16) | (int(px) & 0xFFFF)
 
-    def descend_child(parent, px, py):
-        """Return deepest child under a point, with coordinates relative to it."""
-        target=int(parent)
-        tx,ty=int(px),int(py)
-        for _ in range(16):
-            child=user32.ChildWindowFromPointEx(
-                target,
-                ctypes.wintypes.POINT(tx,ty),
-                0
-            )
-            if not child or int(child)==target:
-                break
-            child=int(child)
-            # Convert current child-relative point -> screen -> child-relative.
-            screen=ctypes.wintypes.POINT(tx,ty)
-            if not user32.ClientToScreen(target,ctypes.byref(screen)):
-                break
-            cp=client_point(child,screen.x,screen.y)
-            if cp is None:
-                break
-            target=child
-            tx,ty=cp
-        return target,tx,ty
-
-    def dispatch(target,tx,ty):
-        lp=(int(ty) << 16) | (int(tx) & 0xFFFF)
+    def send_sequence(target, tx, ty):
+        lp=pack_xy(tx,ty)
         try:
-            # Synchronous path first.
-            user32.SendMessageW(target,WM_MOUSEACTIVATE,int(hwnd),0)
             user32.SendMessageW(target,WM_MOUSEMOVE,0,lp)
             user32.SendMessageW(target,WM_LBUTTONDOWN,MK_LBUTTON,lp)
             user32.SendMessageW(target,WM_LBUTTONUP,0,lp)
-            # Also queue the same messages. Some Unity message pumps consume
-            # queued mouse messages instead of synchronous sends.
             user32.PostMessageW(target,WM_MOUSEMOVE,0,lp)
             user32.PostMessageW(target,WM_LBUTTONDOWN,MK_LBUTTON,lp)
             user32.PostMessageW(target,WM_LBUTTONUP,0,lp)
@@ -217,23 +187,18 @@ def background_click(hwnd, x, y):
         except Exception:
             return False
 
-    # If minimized, restore WITHOUT activation. Unity generally cannot provide
-    # a current rendered frame while minimized. The window remains non-focused;
-    # it can stay behind the user's active window.
-    try:
-        if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd,4)  # SW_SHOWNOACTIVATE
-            time.sleep(0.15)
-    except Exception:
-        pass
-
-    # Image coordinates are client coordinates. Dispatch to the deepest child
-    # under that point first, then the top-level window as a fallback.
-    target,tx,ty=descend_child(hwnd,x,y)
-    if dispatch(target,tx,ty):
+    # Try the selected Unity player HWND itself first.
+    if send_sequence(int(hwnd),x,y):
         return True
-    if target != int(hwnd):
-        return dispatch(int(hwnd),x,y)
+
+    # Fallback for a separate child render/input window.
+    child=user32.ChildWindowFromPointEx(
+        int(hwnd),ctypes.wintypes.POINT(x,y),0
+    )
+    if child and int(child)!=int(hwnd):
+        pt=ctypes.wintypes.POINT(x,y)
+        if user32.ClientToScreen(int(hwnd),ctypes.byref(pt)) and user32.ScreenToClient(int(child),ctypes.byref(pt)):
+            return send_sequence(int(child),int(pt.x),int(pt.y))
     return False
 
 
@@ -397,8 +362,7 @@ class Group:
     chains: list[str] = field(default_factory=list)
 
 class Signals(QObject):
-    event = Signal(str)
-    run = Signal(str)
+    event = Signal(str)    run = Signal(str)
     status = Signal(str)
     finished = Signal()
     recorded = Signal(object)
@@ -788,17 +752,16 @@ class MacroWorker(threading.Thread):
                                 if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
                                 clicked=background_click(self.target_hwnd, cx, cy)
                                 if clicked:
-                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 클릭 ({cx},{cy})")
+                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 입력 전송 ({cx},{cy})")
                                 else:
-                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 클릭 실패 ({cx},{cy})")
+                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 입력 전송 실패 ({cx},{cy})")
                             else:
                                 self.mouse.position=(cx,cy); self.mouse.click(mouse.Button.left)
                                 self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 클릭 ({cx},{cy})")
                     self._wait(st.wait)
                     i = next_i
                 count+=1
-                self.sig.run.emit(f"[{now()}] 반복 {count}회 완료")
-                if self.stop_evt.is_set(): break
+                self.sig.run.emit(f"[{now()}] 반복 {count}회 완료")                if self.stop_evt.is_set(): break
                 self._wait(self.settings['cycle_wait'])
         except Exception as e:
             self.sig.run.emit(f"[{now()}] 오류: {e}")
@@ -1113,8 +1076,40 @@ class MainWindow(QMainWindow):
         else: mode='infinite'
         return {'version':'5.2','steps':[asdict(x) for x in self.steps],'settings':{'mode':mode,'repeat':self.repeat.value(),'minutes':self.minutes.value(),'cycle_wait':self.cycle_wait.value(),'speed':self.speed.currentText().replace('x',''),'image_wait':self.image_wait.value(),'default_acc':self.default_acc.value(),'background':self.background_mode.isChecked(),'target_title':self.target_title.text().strip(),'target_process':self.target_process.text().strip(),'target_hwnd':getattr(self,'_last_target_hwnd',None)}}
     def apply_payload(self,data):
-        self.steps=[Step(**x) for x in data.get('steps',[])]
-        s=data.get('settings',{}); mode=s.get('mode','infinite'); self.r_inf.setChecked(mode=='infinite'); self.r_count.setChecked(mode=='count'); self.r_time.setChecked(mode=='time'); self.repeat.setValue(int(s.get('repeat',1))); self.minutes.setValue(float(s.get('minutes',10))); self.cycle_wait.setValue(float(s.get('cycle_wait',0))); self.speed.setCurrentText(str(s.get('speed','1.0'))+'x'); self.image_wait.setValue(float(s.get('image_wait',10))); self.default_acc.setValue(float(s.get('default_acc',.8))); self.background_mode.setChecked(bool(s.get('background',False))); self.target_title.setText(str(s.get('target_title',''))); self.target_process.setText(str(s.get('target_process',''))); self.refresh_table()
+        # Normalize saved chains so older/newer files cannot pass malformed
+        # fields into the playback worker.
+        raw_steps=data.get('steps',[]) if isinstance(data,dict) else []
+        normalized=[]
+        step_fields={f.name for f in dataclass_fields(Step)}
+        for raw in raw_steps:
+            if not isinstance(raw,dict):
+                continue
+            safe={k:v for k,v in raw.items() if k in step_fields}
+            if not isinstance(safe.get('region',[0,0,0,0]),list):
+                safe['region']=[0,0,0,0]
+            if not isinstance(safe.get('events',[]),list):
+                safe['events']=[]
+            normalized.append(Step(**safe))
+        self.steps=normalized
+        s=data.get('settings',{}) if isinstance(data,dict) else {}
+        mode=s.get('mode','infinite')
+        self.r_inf.setChecked(mode=='infinite'); self.r_count.setChecked(mode=='count'); self.r_time.setChecked(mode=='time')
+        self.repeat.setValue(int(s.get('repeat',1)))
+        self.minutes.setValue(float(s.get('minutes',10)))
+        self.cycle_wait.setValue(float(s.get('cycle_wait',0)))
+        self.speed.setCurrentText(str(s.get('speed','1.0'))+'x')
+        self.image_wait.setValue(float(s.get('image_wait',10)))
+        self.default_acc.setValue(float(s.get('default_acc',.8)))
+        self.background_mode.setChecked(bool(s.get('background',False)))
+        self.target_title.setText(str(s.get('target_title','')))
+        self.target_process.setText(str(s.get('target_process','')))
+        # Preserve the explicitly selected target across save/load.
+        saved_hwnd=s.get('target_hwnd')
+        try:
+            self._last_target_hwnd=int(saved_hwnd) if saved_hwnd else None
+        except Exception:
+            self._last_target_hwnd=None
+        self.refresh_table()
     def save_chain(self):
         if not self.current_file:return self.save_chain_as()
         Path(self.current_file).write_text(json.dumps(self.chain_payload(),ensure_ascii=False,indent=2),encoding='utf-8'); self._mark_chain_clean(); self.log_event(f'[{now()}] 체인 저장 완료: {Path(self.current_file).name}')
@@ -1197,8 +1192,7 @@ class MainWindow(QMainWindow):
         user32=ctypes.windll.user32; n=user32.GetWindowTextLengthW(hwnd)
         buf=ctypes.create_unicode_buffer(n+1); user32.GetWindowTextW(hwnd, buf, n+1); return buf.value
 
-    def _track_foreground_window(self):
-        # Target selection is explicit. Do not infer/replace the target from
+    def _track_foreground_window(self):        # Target selection is explicit. Do not infer/replace the target from
         # whichever window happens to be foreground. This caused the selected
         # Mabinogi Mobile HWND to be replaced by the macro window/other windows.
         return
