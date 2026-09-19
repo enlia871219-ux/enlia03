@@ -154,10 +154,23 @@ def window_client_origin(hwnd):
 
 
 def background_click(hwnd, x, y):
-    """Send background click messages without changing the real cursor or foreground window.
-    This version deliberately uses only the proven basic mouse messages; no
-    WM_NCHITTEST/WM_SETCURSOR calls are made because some Unity window
-    procedures can react badly to synthetic cursor-state messages.
+    """Deliver a Unity click at the requested point while leaving the cursor visually still.
+
+    Important finding from testing:
+    Mabinogi Mobile appears to read the real Windows cursor position while
+    processing its mouse message. Pure WM_* messages therefore click wherever
+    the physical cursor currently is, even when their lParam contains another
+    coordinate.
+
+    The only proven path is a very short cursor teleport:
+    1) save the real cursor position,
+    2) move it to the requested screen point,
+    3) synchronously send the mouse messages,
+    4) restore the cursor immediately.
+
+    No foreground activation and no SendInput are used. The target window can
+    remain behind another window. There is deliberately no sleep while the
+    cursor is displaced, so the visual movement is minimized.
     """
     if os.name != 'nt' or not hwnd:
         return False
@@ -176,29 +189,44 @@ def background_click(hwnd, x, y):
         def pack_xy(px, py):
             return ((int(py) & 0xFFFF) << 16) | (int(px) & 0xFFFF)
 
-        lp=pack_xy(x, y)
+        def client_to_screen(target, px, py):
+            pt=ctypes.wintypes.POINT(int(px), int(py))
+            if not user32.ClientToScreen(target, ctypes.byref(pt)):
+                return None
+            return int(pt.x), int(pt.y)
 
-        # Do not call SetCursorPos, SendInput, SetForegroundWindow, or
-        # any cursor/activation API. The physical pointer remains untouched.
-        user32.SendMessageW(hwnd, WM_MOUSEMOVE, 0, lp)
-        user32.SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp)
-        user32.SendMessageW(hwnd, WM_LBUTTONUP, 0, lp)
+        cursor=ctypes.wintypes.POINT()
+        if not user32.GetCursorPos(ctypes.byref(cursor)):
+            return False
+        old_x, old_y = int(cursor.x), int(cursor.y)
 
-        # Queue the same basic sequence as a second delivery path. This is
-        # harmless for normal Win32 windows and gives Unity's message pump
-        # another opportunity to consume the event.
-        user32.PostMessageW(hwnd, WM_MOUSEMOVE, 0, lp)
-        user32.PostMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp)
-        user32.PostMessageW(hwnd, WM_LBUTTONUP, 0, lp)
-        return True
+        screen=client_to_screen(hwnd, x, y)
+        if screen is None:
+            return False
+
+        try:
+            if not user32.SetCursorPos(screen[0], screen[1]):
+                return False
+
+            lp=pack_xy(x, y)
+
+            # Synchronous delivery is intentional: Unity must process the
+            # message while the real cursor is at the requested point.
+            user32.SendMessageW(hwnd, WM_MOUSEMOVE, 0, lp)
+            user32.SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp)
+            user32.SendMessageW(hwnd, WM_LBUTTONUP, 0, lp)
+            return True
+        finally:
+            # Restore immediately after Unity returns from the synchronous
+            # mouse messages. No delay is introduced here.
+            user32.SetCursorPos(old_x, old_y)
     except Exception:
         return False
 
 def grab_window(hwnd):
     """Capture the client area with PrintWindow, then fall back to MSS for GPU-rendered windows."""
     if os.name != 'nt' or not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
-        return None
-    user32=ctypes.windll.user32; gdi32=ctypes.windll.gdi32
+        return None    user32=ctypes.windll.user32; gdi32=ctypes.windll.gdi32
     rc=ctypes.wintypes.RECT()
     if not user32.GetClientRect(hwnd, ctypes.byref(rc)):
         return None
@@ -397,8 +425,7 @@ def grab_screen(region=None):
         mon = sct.monitors[1]
         if region and region[2] > 0 and region[3] > 0:
             box = {"left": region[0], "top": region[1], "width": region[2], "height": region[3]}
-        else:
-            box = mon
+        else:            box = mon
         shot = np.array(sct.grab(box))
         return cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR)
 
@@ -597,8 +624,7 @@ class MacroWorker(threading.Thread):
         self.advance_evt.set()
     def _wait(self, sec):
         end=time.monotonic()+max(0,sec/max(.1,float(self.settings['speed'])))
-        while time.monotonic()<end and not self.stop_evt.is_set():
-            if not self.pause_evt.is_set(): time.sleep(.05); continue
+        while time.monotonic()<end and not self.stop_evt.is_set():            if not self.pause_evt.is_set(): time.sleep(.05); continue
             time.sleep(.02)
     def run(self):
         mode=self.settings['mode']; repeat=self.settings['repeat']; until=time.monotonic()+self.settings['minutes']*60 if mode=='time' else None; count=0
@@ -797,8 +823,7 @@ class MainWindow(QMainWindow):
                 elif key==keyboard.Key.f2: self.stop_record()
                 elif key==keyboard.Key.f3: self.start_play()
                 elif key==keyboard.Key.f4: self.stop_play()
-                elif key==keyboard.Key.f5: self.toggle_pause()
-            except Exception: pass
+                elif key==keyboard.Key.f5: self.toggle_pause()            except Exception: pass
         self.hotkey_listener=keyboard.Listener(on_press=on_press); self.hotkey_listener.daemon=True; self.hotkey_listener.start()
     def apply_style(self):
         self.setStyleSheet('''
@@ -998,487 +1023,3 @@ class MainWindow(QMainWindow):
                 try: shutil.copy2(f,dest)
                 except Exception: pass
         self.refresh_image_list()
-    def refresh_image_list(self):
-        self.image_list.clear()
-        for p in sorted(TEMPLATE_DIR.iterdir()):
-            if p.suffix.lower() in ('.png','.jpg','.jpeg','.bmp','.webp','.svg'): self.image_list.addItem(str(p))
-    def preview_image(self):
-        row=self.image_list.currentRow()
-        if row<0: return
-        p=self.image_list.item(row).text(); pm=image_to_qpixmap(p,QSize(720,520)); self.image_preview.setPixmap(pm); self.image_info.setText(f'{p}  |  {Path(p).suffix.lower()}  |  {Path(p).stat().st_size/1024:.1f} KB')
-    def add_library_to_chain(self):
-        row=self.image_list.currentRow()
-        if row<0: return
-        p=self.image_list.item(row).text()
-        self.steps.append(Step(name=Path(p).stem,path=p,accuracy=self.default_acc.value()))
-        self.refresh_table()
-        self.log_event(f'[{now()}] 이미지 라이브러리 항목을 체인에 추가: {Path(p).name}')
-
-    def delete_image(self):
-        row=self.image_list.currentRow()
-        if row<0:return
-        p=Path(self.image_list.item(row).text())
-        if QMessageBox.question(self,'삭제',f'{p.name}을(를) 삭제할까요?')==QMessageBox.Yes:
-            try:p.unlink()
-            except:pass
-            self.refresh_image_list()
-    def edit_selected(self,*_):
-        r=self.table.currentRow()
-        if r<0 or r>=len(self.steps): return
-        if self.steps[r].type=='recording':
-            d=RecordingEditorDialog(self.steps[r], self)
-        else:
-            d=StepEditor(self.steps[r],self)
-        if d.exec()==QDialog.Accepted:
-            self.log_event(f'[{now()}] 항목 편집: {self.steps[r].name}'); self.refresh_table()
-    def remove_selected(self):
-        rows=sorted({x.row() for x in self.table.selectedIndexes()},reverse=True)
-        for r in rows:
-            if 0<=r<len(self.steps): self.log_event(f'[{now()}] 항목 제거: {self.steps[r].name}'); self.steps.pop(r)
-        self.refresh_table()
-    def move_up(self):
-        r=self.table.currentRow()
-        if r>0:
-            self.steps[r-1],self.steps[r]=self.steps[r],self.steps[r-1]
-            self.refresh_table(); self.table.selectRow(r-1)
-            self.current_step = r-1 if self.current_step == r else self.current_step
-    def move_down(self):
-        r=self.table.currentRow()
-        if 0<=r<len(self.steps)-1:
-            self.steps[r+1],self.steps[r]=self.steps[r],self.steps[r+1]
-            self.refresh_table(); self.table.selectRow(r+1)
-            self.current_step = r+1 if self.current_step == r else self.current_step
-    def clear_all(self):
-        if not self.steps:return
-        if QMessageBox.question(self,'모두 삭제','현재 체인을 모두 삭제할까요?')==QMessageBox.Yes: self.steps.clear(); self.refresh_table(); self.log_event(f'[{now()}] 매크로 체인 모두 삭제')
-    def _chain_snapshot(self):
-        """Return a stable representation of the current macro chain and settings."""
-        try:
-            return json.dumps(self.chain_payload(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        except Exception:
-            return None
-
-    def _mark_chain_clean(self):
-        self._clean_chain_snapshot = self._chain_snapshot()
-
-    def _has_unsaved_changes(self):
-        return self._chain_snapshot() != self._clean_chain_snapshot
-
-    def chain_payload(self):
-        if self.r_count.isChecked(): mode='count'
-        elif self.r_time.isChecked(): mode='time'
-        else: mode='infinite'
-        return {'version':'5.2','steps':[asdict(x) for x in self.steps],'settings':{'mode':mode,'repeat':self.repeat.value(),'minutes':self.minutes.value(),'cycle_wait':self.cycle_wait.value(),'speed':self.speed.currentText().replace('x',''),'image_wait':self.image_wait.value(),'default_acc':self.default_acc.value(),'background':self.background_mode.isChecked(),'target_title':self.target_title.text().strip(),'target_process':self.target_process.text().strip(),'target_hwnd':getattr(self,'_last_target_hwnd',None)}}
-    def apply_payload(self,data):
-        # Normalize saved chains so older/newer files cannot pass malformed
-        # fields into the playback worker.
-        raw_steps=data.get('steps',[]) if isinstance(data,dict) else []
-        normalized=[]
-        step_fields={f.name for f in dataclass_fields(Step)}
-        for raw in raw_steps:
-            if not isinstance(raw,dict):
-                continue
-            safe={k:v for k,v in raw.items() if k in step_fields}
-            if not isinstance(safe.get('region',[0,0,0,0]),list):
-                safe['region']=[0,0,0,0]
-            if not isinstance(safe.get('events',[]),list):
-                safe['events']=[]
-            normalized.append(Step(**safe))
-        self.steps=normalized
-        s=data.get('settings',{}) if isinstance(data,dict) else {}
-        mode=s.get('mode','infinite')
-        self.r_inf.setChecked(mode=='infinite'); self.r_count.setChecked(mode=='count'); self.r_time.setChecked(mode=='time')
-        self.repeat.setValue(int(s.get('repeat',1)))
-        self.minutes.setValue(float(s.get('minutes',10)))
-        self.cycle_wait.setValue(float(s.get('cycle_wait',0)))
-        self.speed.setCurrentText(str(s.get('speed','1.0'))+'x')
-        self.image_wait.setValue(float(s.get('image_wait',10)))
-        self.default_acc.setValue(float(s.get('default_acc',.8)))
-        self.background_mode.setChecked(bool(s.get('background',False)))
-        self.target_title.setText(str(s.get('target_title','')))
-        self.target_process.setText(str(s.get('target_process','')))
-        # Preserve the explicitly selected target across save/load.
-        saved_hwnd=s.get('target_hwnd')
-        try:
-            self._last_target_hwnd=int(saved_hwnd) if saved_hwnd else None
-        except Exception:
-            self._last_target_hwnd=None
-        self.refresh_table()
-    def save_chain(self):
-        if not self.current_file:return self.save_chain_as()
-        Path(self.current_file).write_text(json.dumps(self.chain_payload(),ensure_ascii=False,indent=2),encoding='utf-8'); self._mark_chain_clean(); self.log_event(f'[{now()}] 체인 저장 완료: {Path(self.current_file).name}')
-    def save_chain_as(self):
-        f,_=QFileDialog.getSaveFileName(self,'체인 저장',str(APP_DIR/'새 매크로.pchain'),'PChain (*.pchain);;JSON (*.json)')
-        if f:self.current_file=f; self.save_chain()
-    def load_chain(self):
-        f,_=QFileDialog.getOpenFileName(self,'체인 불러오기',str(APP_DIR),'PChain (*.pchain *.json)')
-        if not f:return
-        try:self.apply_payload(json.loads(Path(f).read_text(encoding='utf-8'))); self.current_file=f; self._mark_chain_clean(); self.log_event(f'[{now()}] 체인 불러오기 완료: {Path(f).name}')
-        except Exception as e: QMessageBox.critical(self,'불러오기 실패',str(e))
-    def _style_action_buttons(self):
-        for b in (self.rec_start_btn, self.play_start_btn, self.pause_btn): b.setObjectName('blueAction')
-        self.pause_btn.setObjectName('greenAction')
-        for b in (self.rec_stop_btn, self.play_stop_btn): b.setObjectName('redAction')
-        for b in (self.prev_btn, self.next_btn): b.setObjectName('stepAction')
-        # Re-polish after objectName changes.
-        for b in (self.rec_start_btn,self.rec_stop_btn,self.play_start_btn,self.pause_btn,self.play_stop_btn,self.prev_btn,self.next_btn):
-            self.style().unpolish(b); self.style().polish(b); b.update()
-
-    def update_button_states(self):
-        """Synchronize the toolbar's enabled/disabled state with the macro state."""
-        if not hasattr(self, 'rec_start_btn'):
-            return
-
-        recording = bool(self.recording)
-        playing = bool(self.playing)
-        paused = bool(playing and self.worker and getattr(self.worker, '_paused', False))
-
-        # Initial state: record/play/previous/next are usable; stop/pause are greyed out.
-        # While recording: only Record Stop is enabled among record controls.
-        # While playing: Play Start is disabled; Pause and Play Stop are enabled.
-        self.rec_start_btn.setEnabled(not recording and not playing)
-        self.rec_stop_btn.setEnabled(recording)
-        self.play_start_btn.setEnabled(not recording and not playing)
-        self.pause_btn.setEnabled(playing)
-        self.play_stop_btn.setEnabled(playing)
-
-        # Previous/Next are intentionally always enabled, matching the requested UI.
-        self.prev_btn.setEnabled(True)
-        self.next_btn.setEnabled(True)
-
-        self.pause_btn.setText('재개 (F5)' if paused else '일시정지 (F5)')
-        self._style_action_buttons()
-
-
-    def start_record(self):
-        if self.recording or (self.worker and self.worker.is_alive()): return
-        self.recording=True; self.record_last=time.monotonic(); self.record_events=[]
-        self.log_event(f'[{now()}] 녹화 시작')
-        self.update_button_states()
-        def on_click(x,y,button,pressed):
-            if not self.recording or not pressed or button!=mouse.Button.left:return
-            elapsed=time.monotonic()-self.record_last; self.record_last=time.monotonic()
-            wait=elapsed if self.record_events else 0.0
-            self.record_events.append({'x':int(x),'y':int(y),'wait':round(wait,4)})
-            self.log_event(f'[{now()}] 녹화 중 클릭: ({int(x)},{int(y)}) / 이전 클릭 후 {wait:.2f}s')
-        self.record_listener=mouse.Listener(on_click=on_click); self.record_listener.daemon=True; self.record_listener.start()
-
-    def stop_record(self):
-        if not self.recording:return
-        self.recording=False
-        try:
-            if self.record_listener: self.record_listener.stop()
-        except: pass
-        self.record_listener=None
-        events=list(getattr(self,'record_events',[]))
-        if events:
-            name=f'녹화_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
-            self.steps.append(Step(type='recording', name=name, wait=0, accuracy=self.default_acc.value(), events=events))
-            self.refresh_table()
-            self.log_event(f'[{now()}] 녹화 중지 → 하나의 녹화 매크로로 추가 ({len(events)}개 클릭)')
-        else:
-            self.log_event(f'[{now()}] 녹화 중지 → 녹화된 동작 없음')
-        self.record_events=[]
-        self.update_button_states()
-
-    def foreground_window_title_for(self, hwnd):
-        if os.name != 'nt' or not hwnd: return ''
-        user32=ctypes.windll.user32; n=user32.GetWindowTextLengthW(hwnd)
-        buf=ctypes.create_unicode_buffer(n+1); user32.GetWindowTextW(hwnd, buf, n+1); return buf.value
-
-    def _track_foreground_window(self):        # Target selection is explicit. Do not infer/replace the target from
-        # whichever window happens to be foreground. This caused the selected
-        # Mabinogi Mobile HWND to be replaced by the macro window/other windows.
-        return
-
-    def _set_target_status(self, ok, text):
-        if hasattr(self, 'target_status'):
-            self.target_status.setText(text)
-            self.target_status.setStyleSheet('color:#176b2c;font-weight:700;' if ok else 'color:#b32626;font-weight:700;')
-
-    def select_target_window(self):
-        """Open a reliable window picker. Selecting a row immediately stores the HWND."""
-        if os.name != 'nt':
-            QMessageBox.warning(self, '대상 창', 'Windows에서만 사용할 수 있습니다.')
-            return
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, QPushButton, QLabel, QMessageBox
-        from PySide6.QtCore import Qt
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle('대상 창 선택')
-        dlg.resize(900, 600)
-        lay = QVBoxLayout(dlg)
-        lay.addWidget(QLabel('목록에서 대상 프로그램의 창을 클릭하세요. 선택한 창은 아래 상태에 즉시 표시됩니다.'))
-
-        table = QTableWidget(0, 3)
-        table.setHorizontalHeaderLabels(['창 이름', '프로세스', 'HWND'])
-        table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.setSelectionMode(QAbstractItemView.SingleSelection)
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        lay.addWidget(table, 1)
-
-        selected = {'hwnd': None, 'title': '', 'proc': ''}
-
-        def load_rows(preferred=None):
-            table.setRowCount(0)
-            rows = list_visible_windows()
-            for hwnd, title, proc in rows:
-                r = table.rowCount()
-                table.insertRow(r)
-                table.setItem(r, 0, QTableWidgetItem(title))
-                table.setItem(r, 1, QTableWidgetItem(proc or '(읽기 실패)'))
-                table.setItem(r, 2, QTableWidgetItem(str(hwnd)))
-                table.item(r, 0).setData(Qt.UserRole, int(hwnd))
-            if preferred:
-                for r in range(table.rowCount()):
-                    if int(table.item(r, 0).data(Qt.UserRole)) == int(preferred):
-                        table.selectRow(r)
-                        table.scrollToItem(table.item(r, 0))
-                        break
-
-        def capture_row(row):
-            if row < 0 or row >= table.rowCount():
-                return
-            item = table.item(row, 0)
-            if item is None:
-                return
-            hwnd = int(item.data(Qt.UserRole))
-            if not ctypes.windll.user32.IsWindow(hwnd):
-                self._set_target_status(False, '✗ 선택한 창이 더 이상 존재하지 않습니다.')
-                return
-            title = table.item(row, 0).text()
-            proc = table.item(row, 1).text()
-            if proc == '(읽기 실패)':
-                proc = window_process_name(hwnd)
-            selected.update(hwnd=hwnd, title=title, proc=proc)
-            # IMPORTANT: apply immediately, not after dlg.exec().
-            self._last_target_hwnd = hwnd
-            self._target_window_locked = True
-            self.target_title.setText(title)
-            self.target_process.setText(proc)
-            self._set_target_status(True, f'✓ 선택됨: {title}  [{proc or "프로세스명 읽기 실패"}]')
-            self.log_event(f'[{now()}] 대상 창 선택: HWND={hwnd}, 창={title}, 프로세스={proc}')
-
-        load_rows(getattr(self, '_last_target_hwnd', None))
-        table.cellClicked.connect(lambda row, col: capture_row(row))
-        table.cellDoubleClicked.connect(lambda row, col: (capture_row(row), dlg.accept()))
-
-        btnrow = QHBoxLayout(); btnrow.addStretch()
-        refresh = QPushButton('새로고침')
-        ok = QPushButton('선택 완료')
-        cancel = QPushButton('취소')
-        btnrow.addWidget(refresh); btnrow.addWidget(ok); btnrow.addWidget(cancel)
-        lay.addLayout(btnrow)
-
-        refresh.clicked.connect(lambda: load_rows(selected['hwnd'] or getattr(self, '_last_target_hwnd', None)))
-        ok.clicked.connect(lambda: dlg.accept() if selected['hwnd'] else QMessageBox.warning(dlg, '대상 창 선택', '먼저 목록에서 대상 창을 클릭하세요.'))
-        cancel.clicked.connect(dlg.reject)
-
-        # Do not require the dialog's return code to commit the selection: capture_row already did it.
-        dlg.exec()
-
-        if selected['hwnd']:
-            hwnd = int(selected['hwnd'])
-            title = selected['title'] or self.foreground_window_title_for(hwnd)
-            proc = selected['proc'] or window_process_name(hwnd)
-            self._last_target_hwnd = hwnd
-            self.target_title.setText(title)
-            self.target_process.setText(proc)
-            self._set_target_status(True, f'✓ 선택됨: {title}  [{proc or "프로세스명 읽기 실패"}]')
-            QMessageBox.information(self, '대상 창 선택 완료', f'대상 창이 선택되었습니다.\n\n창 이름: {title}\n프로세스: {proc or "읽지 못함"}\nHWND: {hwnd}')
-
-    def pick_target_window(self):
-        hwnd=self._last_target_hwnd
-        title_filter=self.target_title.text().strip(); process_filter=self.target_process.text().strip()
-        if title_filter or process_filter: hwnd=find_window_by_title(title_filter, process_filter) or hwnd
-        if hwnd:
-            title=self.foreground_window_title_for(hwnd); proc=window_process_name(hwnd)
-            if not title and not proc:
-                self._set_target_status(False, '대상 창 정보를 읽지 못했습니다.')
-                QMessageBox.warning(self,'대상 창','선택된 창의 이름/프로세스 정보를 읽지 못했습니다.'); return
-            self.target_title.setText(title); self.target_process.setText(proc)
-            self._set_target_status(True, f'✓ 대상 창 선택됨: {title}  [{proc or "프로세스명 읽기 실패"}]')
-            self.log_event(f'[{now()}] 백그라운드 대상 창 지정: {title} / {proc}')
-            QMessageBox.information(self,'대상 창 선택 완료',f'대상 창이 선택되었습니다.\n\n창 이름: {title}\n프로세스: {proc or "읽지 못함"}')
-        else:
-            self._set_target_status(False, '대상 창을 찾지 못했습니다.')
-            QMessageBox.warning(self,'대상 창','대상 창을 찾지 못했습니다.\n\n대상 프로그램을 먼저 활성화한 뒤 이 버튼을 눌러주세요.')
-
-    def settings(self):
-        mode='count' if self.r_count.isChecked() else 'time' if self.r_time.isChecked() else 'infinite'; return {'mode':mode,'repeat':self.repeat.value(),'minutes':self.minutes.value(),'cycle_wait':self.cycle_wait.value(),'speed':float(self.speed.currentText().replace('x','')),'image_wait':self.image_wait.value(),'background':self.background_mode.isChecked(),'target_title':self.target_title.text().strip(),'target_process':self.target_process.text().strip(),'target_hwnd':getattr(self,'_last_target_hwnd',None)}
-    def next_step(self):
-        if not self.steps: return
-        if self.current_step < len(self.steps)-1:
-            self.highlight_step(self.current_step + 1 if self.current_step >= 0 else 0)
-        if self.worker and self.worker.is_alive():
-            self.worker.next_step(); self.log_event(f'[{now()}] 다음 단계로 이동')
-
-    def prev_step(self):
-        if not self.steps: return
-        if self.current_step > 0:
-            self.highlight_step(self.current_step - 1)
-        elif self.current_step < 0:
-            self.highlight_step(0)
-        if self.worker and self.worker.is_alive():
-            self.worker.prev_step(); self.log_event(f'[{now()}] 이전 단계로 이동')
-
-    def start_play(self):
-        # Never fail silently: record the button entry and every early-return reason.
-        try:
-            self.runlog(f"[{now()}] 재생 시작 버튼 입력")
-        except Exception:
-            pass
-        if self.recording:
-            self.runlog(f"[{now()}] 재생 시작 무시: 현재 녹화 중입니다.")
-            return
-        if self.worker and self.worker.is_alive():
-            self.runlog(f"[{now()}] 재생 시작 무시: 기존 재생 스레드가 아직 실행 중입니다.")
-            return
-        if not self.steps:
-            self.runlog(f"[{now()}] 재생 시작 실패: 재생할 매크로가 없습니다.")
-            QMessageBox.information(self,'재생','재생할 매크로가 없습니다.')
-            return
-        settings=self.settings()
-        selected_hwnd=int(getattr(self,'_last_target_hwnd',0) or 0)
-        self.runlog(f"[{now()}] 재생 설정 확인: 단계={len(self.steps)}, 백그라운드={settings.get('background')}, 선택HWND={selected_hwnd}, 대상창={settings.get('target_title')} [{settings.get('target_process')}]")
-        if settings.get('background'):
-            # The explicitly selected HWND is the single source of truth.
-            # Never replace it with the foreground window or the macro app HWND.
-            hwnd=selected_hwnd
-            title_filter=settings.get('target_title','')
-            proc_filter=settings.get('target_process','')
-            if not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
-                hwnd=find_window_by_title(title_filter, proc_filter)
-            elif not _window_matches(hwnd, title_filter, proc_filter):
-                self.runlog(f'[{now()}] 선택 HWND 검증 불일치: HWND={hwnd} → 제목/프로세스로 재탐색')
-                hwnd=find_window_by_title(title_filter, proc_filter)
-            if not hwnd:
-                self._set_target_status(False, '✗ 대상 창을 찾지 못했습니다.')
-                self.runlog(f'[{now()}] 백그라운드 재생 시작 실패: 대상 HWND가 없습니다.')
-                QMessageBox.warning(self,'백그라운드 재생','선택된 대상 창을 찾지 못했습니다.\n\n창 선택에서 대상 창을 다시 선택해주세요.')
-                return
-            hwnd=int(hwnd)
-            self._last_target_hwnd=hwnd
-            settings['target_hwnd']=hwnd
-            title=self.foreground_window_title_for(hwnd); proc=window_process_name(hwnd)
-            self.target_title.setText(title)
-            self.target_process.setText(proc)
-            self._set_target_status(True, f'✓ 재생 대상 확인: {title}  [{proc or "프로세스명 읽기 실패"}]')
-            self.runlog(f'[{now()}] 재생 대상 고정: HWND={hwnd}, 창={title}, 프로세스={proc}')
-            self.log_event(f'[{now()}] 재생 대상 확인: HWND={hwnd}, 창={title}, 프로세스={proc}')
-        try:
-            # Keep the QObject alive explicitly for the entire worker lifetime.
-            self._worker_signals=Signals()
-            self.worker=MacroWorker(self.steps,settings,self._worker_signals)
-            self.worker._paused=False
-            self.playing=True
-            self.worker.sig.run.connect(self.runlog)
-            self.worker.sig.step.connect(self.highlight_step)
-            self.worker.sig.finished.connect(self._play_finished)
-            self.runlog(f'[{now()}] 재생 스레드 생성 완료')
-            self.update_button_states()
-            self.worker.start()
-            self.runlog(f'[{now()}] 재생 스레드 시작 완료 (단계 {len(self.steps)}개)')
-            self.log_event(f'[{now()}] 재생 시작')
-        except Exception as e:
-            self.playing=False
-            self.runlog(f'[{now()}] 재생 시작 예외: {type(e).__name__}: {e}')
-            self.update_button_states()
-            QMessageBox.critical(self,'재생 시작 오류',f'재생을 시작하지 못했습니다.\n\n{type(e).__name__}: {e}')
-
-    def _play_finished(self):
-        self.playing=False
-        self.clear_step_highlight()
-        self.runlog(f'[{now()}] 실행 스레드 종료')
-        self.update_button_states()
-
-    def stop_play(self):
-        if self.worker and self.worker.is_alive():
-            self.worker.stop(); self.log_event(f'[{now()}] 재생 중지 요청')
-        self.playing=False
-        self.clear_step_highlight()
-        if self.worker:
-            self.worker._paused=False
-        # Always restore the normal Play/Pause button state after Stop.
-        self.pause_btn.setText('일시정지 (F5)') if hasattr(self, 'pause_btn') else None
-        self.update_button_states()
-
-    def toggle_pause(self):
-        if not self.worker or not self.worker.is_alive(): return
-        if getattr(self.worker,'_paused',False):
-            self.worker._paused=False; self.worker.resume(); self.log_event(f'[{now()}] 재생 재개')
-        else:
-            self.worker._paused=True; self.worker.pause(); self.log_event(f'[{now()}] 재생 일시정지')
-        self.update_button_states()
-
-    @property
-    def groups_file(self): return DATA_DIR / 'groups.json'
-    def load_groups(self):
-        try:
-            data=json.loads(self.groups_file.read_text(encoding='utf-8'))
-            self.groups=[Group(**x) for x in data]
-        except Exception:
-            self.groups=[]
-    def save_groups(self):
-        try: self.groups_file.write_text(json.dumps([asdict(g) for g in self.groups],ensure_ascii=False,indent=2),encoding='utf-8')
-        except Exception: pass
-
-    def add_group(self):
-        name,ok=QInputDialog.getText(self,'그룹 추가','그룹 이름:') if False else (None,False)
-        # keep dependency-free fallback dialog
-        d=QDialog(self); d.setWindowTitle('그룹 추가'); l=QVBoxLayout(d); e=QLineEdit(); l.addWidget(e); b=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel); l.addWidget(b); b.accepted.connect(d.accept); b.rejected.connect(d.reject)
-        if d.exec()==QDialog.Accepted and e.text().strip(): self.groups.append(Group(e.text().strip())); self.save_groups(); self.refresh_groups()
-    def rename_group(self):
-        i=self.group_list.currentRow();
-        if i<0:return
-        d=QDialog(self); d.setWindowTitle('이름 변경'); l=QVBoxLayout(d); e=QLineEdit(self.groups[i].name); l.addWidget(e); b=QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel); l.addWidget(b); b.accepted.connect(d.accept); b.rejected.connect(d.reject)
-        if d.exec()==QDialog.Accepted and e.text().strip(): self.groups[i].name=e.text().strip(); self.save_groups(); self.refresh_groups()
-    def delete_group(self):
-        i=self.group_list.currentRow();
-        if i>=0:self.groups.pop(i); self.save_groups(); self.refresh_groups()
-    def refresh_groups(self):
-        self.group_list.clear(); self.group_list.addItems([g.name for g in self.groups]); self.refresh_group_chains()
-    def refresh_group_chains(self):
-        self.group_chain_list.clear(); i=self.group_list.currentRow();
-        if i>=0:self.group_chain_list.addItems(self.groups[i].chains)
-    def add_chain_to_group(self):
-        i=self.group_list.currentRow();
-        if i<0:return
-        f,_=QFileDialog.getOpenFileName(self,'체인 추가',str(APP_DIR),'PChain (*.pchain *.json)');
-        if f:self.groups[i].chains.append(f); self.save_groups(); self.refresh_group_chains()
-    def remove_chain_from_group(self):
-        gi=self.group_list.currentRow(); ci=self.group_chain_list.currentRow();
-        if gi>=0 and ci>=0:self.groups[gi].chains.pop(ci); self.save_groups(); self.refresh_group_chains()
-    def load_group_chain(self):
-        gi=self.group_list.currentRow(); ci=self.group_chain_list.currentRow();
-        if gi<0 or ci<0:return
-        f=self.groups[gi].chains[ci]
-        try:self.apply_payload(json.loads(Path(f).read_text(encoding='utf-8'))); self.current_file=f; self._mark_chain_clean(); self.log_event(f'[{now()}] 그룹 체인 불러오기: {Path(f).name}')
-        except Exception as e: QMessageBox.warning(self,'오류',str(e))
-    def play_group(self):
-        self.load_group_chain(); self.start_play()
-    def closeEvent(self,e):
-        if self._has_unsaved_changes():
-            answer = QMessageBox.question(
-                self,
-                '종료 확인',
-                '저장되지 않은 변경사항이 있습니다. 저장하지 않고 종료하시겠습니까?',
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-            if answer != QMessageBox.Yes:
-                e.ignore()
-                return
-        self.stop_record(); self.stop_play()
-        try:self.hotkey_listener.stop()
-        except:pass
-        e.accept()
-
-# Fix missing import without making it visible in UI
-from PySide6.QtWidgets import QInputDialog
-
-if __name__=='__main__':
-    app=QApplication(sys.argv); app.setApplicationName(APP_NAME); w=MainWindow(); w.show(); sys.exit(app.exec())
