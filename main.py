@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-09-20-IMGDEBUG-06"
+BUILD_ID = "2026-09-20-IMGDEBUG-07"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -154,14 +154,17 @@ def window_client_origin(hwnd):
 
 
 def background_click(hwnd, x, y):
-    """Send background mouse messages without activating the target window.
+    """Dispatch a Unity click while keeping the target window inactive.
 
-    This deliberately never calls SetForegroundWindow, SetCursorPos, or
-    SendInput. The requested client coordinates are carried in lParam.
+    Mabinogi Mobile appears to consult the real Windows cursor position while
+    handling mouse messages. Therefore, temporarily move the real cursor to
+    the requested client point, synchronously send the mouse messages, then
+    restore the cursor. This never activates the target window.
     """
     if os.name != 'nt' or not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
         return False
     user32=ctypes.windll.user32
+    hwnd=int(hwnd)
     x=int(x); y=int(y)
     if x < 0 or y < 0:
         return False
@@ -174,33 +177,56 @@ def background_click(hwnd, x, y):
     def pack_xy(px,py):
         return ((int(py) & 0xFFFF) << 16) | (int(px) & 0xFFFF)
 
+    def client_to_screen(target, px, py):
+        pt=ctypes.wintypes.POINT(int(px),int(py))
+        if not user32.ClientToScreen(int(target),ctypes.byref(pt)):
+            return None
+        return int(pt.x), int(pt.y)
+
     def send_sequence(target, tx, ty):
         lp=pack_xy(tx,ty)
         try:
             user32.SendMessageW(target,WM_MOUSEMOVE,0,lp)
             user32.SendMessageW(target,WM_LBUTTONDOWN,MK_LBUTTON,lp)
             user32.SendMessageW(target,WM_LBUTTONUP,0,lp)
-            user32.PostMessageW(target,WM_MOUSEMOVE,0,lp)
-            user32.PostMessageW(target,WM_LBUTTONDOWN,MK_LBUTTON,lp)
-            user32.PostMessageW(target,WM_LBUTTONUP,0,lp)
             return True
         except Exception:
             return False
 
-    # Try the selected Unity player HWND itself first.
-    if send_sequence(int(hwnd),x,y):
-        return True
+    cursor=ctypes.wintypes.POINT()
+    if not user32.GetCursorPos(ctypes.byref(cursor)):
+        return False
+    old_x,old_y=int(cursor.x),int(cursor.y)
+
+    # First try the selected Unity player HWND.
+    screen=client_to_screen(hwnd,x,y)
+    if screen is not None:
+        try:
+            if user32.SetCursorPos(screen[0],screen[1]):
+                if send_sequence(hwnd,x,y):
+                    time.sleep(0.03)
+                    return True
+        finally:
+            user32.SetCursorPos(old_x,old_y)
 
     # Fallback for a separate child render/input window.
     child=user32.ChildWindowFromPointEx(
-        int(hwnd),ctypes.wintypes.POINT(x,y),0
+        hwnd,ctypes.wintypes.POINT(x,y),0
     )
-    if child and int(child)!=int(hwnd):
-        pt=ctypes.wintypes.POINT(x,y)
-        if user32.ClientToScreen(int(hwnd),ctypes.byref(pt)) and user32.ScreenToClient(int(child),ctypes.byref(pt)):
-            return send_sequence(int(child),int(pt.x),int(pt.y))
+    if child and int(child)!=hwnd:
+        child=int(child)
+        screen=client_to_screen(hwnd,x,y)
+        if screen is not None:
+            child_pt=ctypes.wintypes.POINT(screen[0],screen[1])
+            if user32.ScreenToClient(child,ctypes.byref(child_pt)):
+                try:
+                    if user32.SetCursorPos(screen[0],screen[1]):
+                        if send_sequence(child,int(child_pt.x),int(child_pt.y)):
+                            time.sleep(0.03)
+                            return True
+                finally:
+                    user32.SetCursorPos(old_x,old_y)
     return False
-
 
 def grab_window(hwnd):
     """Capture the client area with PrintWindow, then fall back to MSS for GPU-rendered windows."""
