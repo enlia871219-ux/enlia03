@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-09-20-IMGDEBUG-08-SAFE"
+BUILD_ID = "2026-09-20-CURSORFREE-09-SYNTHETIC-TOUCH"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -154,26 +154,22 @@ def window_client_origin(hwnd):
 
 
 def background_click(hwnd, x, y):
-    """Deliver a Unity click at the requested point while leaving the cursor visually still.
+    """Try a real Windows synthetic pointer click without moving the physical cursor.
 
-    Important finding from testing:
-    Mabinogi Mobile appears to read the real Windows cursor position while
-    processing its mouse message. Pure WM_* messages therefore click wherever
-    the physical cursor currently is, even when their lParam contains another
-    coordinate.
+    The previous WM_* approach was proven to depend on the real cursor position
+    in Mabinogi Mobile. Windows 10/11 also expose a synthetic touch/pen pointer
+    injection API. This path creates a temporary PT_TOUCH device and injects a
+    DOWN/UP pair at the requested screen coordinate, without SetCursorPos,
+    SendInput, or foreground activation.
 
-    The only proven path is a very short cursor teleport:
-    1) save the real cursor position,
-    2) move it to the requested screen point,
-    3) synchronously send the mouse messages,
-    4) restore the cursor immediately.
-
-    No foreground activation and no SendInput are used. The target window can
-    remain behind another window. There is deliberately no sleep while the
-    cursor is displaced, so the visual movement is minimized.
+    This is intentionally a cursor-free experiment: if the OS accepts the
+    synthetic pointer injection, True is returned. If the API is unavailable or
+    the injection fails, False is returned rather than falling back to a
+    physical-cursor teleport.
     """
     if os.name != 'nt' or not hwnd:
         return False
+
     try:
         user32=ctypes.windll.user32
         hwnd=int(hwnd)
@@ -181,45 +177,135 @@ def background_click(hwnd, x, y):
         if not user32.IsWindow(hwnd) or x < 0 or y < 0:
             return False
 
-        WM_MOUSEMOVE=0x0200
-        WM_LBUTTONDOWN=0x0201
-        WM_LBUTTONUP=0x0202
-        MK_LBUTTON=0x0001
-
-        def pack_xy(px, py):
-            return ((int(py) & 0xFFFF) << 16) | (int(px) & 0xFFFF)
-
-        def client_to_screen(target, px, py):
-            pt=ctypes.wintypes.POINT(int(px), int(py))
-            if not user32.ClientToScreen(target, ctypes.byref(pt)):
-                return None
-            return int(pt.x), int(pt.y)
-
-        cursor=ctypes.wintypes.POINT()
-        if not user32.GetCursorPos(ctypes.byref(cursor)):
+        # Convert the recognized client coordinate to the virtual-screen
+        # coordinate expected by InjectSyntheticPointerInput.
+        pt=ctypes.wintypes.POINT(x, y)
+        if not user32.ClientToScreen(hwnd, ctypes.byref(pt)):
             return False
-        old_x, old_y = int(cursor.x), int(cursor.y)
+        sx, sy = int(pt.x), int(pt.y)
 
-        screen=client_to_screen(hwnd, x, y)
-        if screen is None:
+        # Win32 pointer constants.
+        PT_TOUCH=0x00000002
+        POINTER_FEEDBACK_NONE=0x00000002
+        POINTER_FLAG_NEW=0x00000001
+        POINTER_FLAG_INRANGE=0x00000002
+        POINTER_FLAG_INCONTACT=0x00000004
+        POINTER_FLAG_PRIMARY=0x00002000
+        POINTER_FLAG_DOWN=0x00010000
+        POINTER_FLAG_UP=0x00040000
+        TOUCH_MASK_CONTACT=0x00000001
+        TOUCH_MASK_PRESSURE=0x00000004
+
+        class POINTER_INFO(ctypes.Structure):
+            _fields_=[
+                ('pointerType', ctypes.wintypes.UINT),
+                ('pointerId', ctypes.wintypes.UINT),
+                ('frameId', ctypes.wintypes.UINT),
+                ('pointerFlags', ctypes.wintypes.UINT),
+                ('sourceDevice', ctypes.c_void_p),
+                ('hwndTarget', ctypes.wintypes.HWND),
+                ('ptPixelLocation', ctypes.wintypes.POINT),
+                ('ptHimetricLocation', ctypes.wintypes.POINT),
+                ('ptPixelLocationRaw', ctypes.wintypes.POINT),
+                ('ptHimetricLocationRaw', ctypes.wintypes.POINT),
+                ('dwTime', ctypes.wintypes.DWORD),
+                ('historyCount', ctypes.wintypes.UINT),
+                ('inputData', ctypes.wintypes.LONG),
+                ('dwKeyStates', ctypes.wintypes.DWORD),
+                ('PerformanceCount', ctypes.c_uint64),
+                ('ButtonChangeType', ctypes.wintypes.INT),
+            ]
+
+        class POINTER_TOUCH_INFO(ctypes.Structure):
+            _fields_=[
+                ('pointerInfo', POINTER_INFO),
+                ('touchFlags', ctypes.wintypes.DWORD),
+                ('touchMask', ctypes.wintypes.DWORD),
+                ('rcContact', ctypes.wintypes.RECT),
+                ('rcContactRaw', ctypes.wintypes.RECT),
+                ('orientation', ctypes.wintypes.UINT),
+                ('pressure', ctypes.wintypes.UINT),
+            ]
+
+        class POINTER_TYPE_INFO_UNION(ctypes.Union):
+            _fields_=[
+                ('pointerInfo', POINTER_INFO),
+                ('touchInfo', POINTER_TOUCH_INFO),
+            ]
+
+        class POINTER_TYPE_INFO(ctypes.Structure):
+            _anonymous_=('u',)
+            _fields_=[
+                ('type', ctypes.wintypes.UINT),
+                ('u', POINTER_TYPE_INFO_UNION),
+            ]
+
+        create= user32.CreateSyntheticPointerDevice
+        inject= user32.InjectSyntheticPointerInput
+        destroy= user32.DestroySyntheticPointerDevice
+        create.argtypes=[ctypes.wintypes.UINT, ctypes.wintypes.UINT, ctypes.wintypes.UINT]
+        create.restype=ctypes.c_void_p
+        inject.argtypes=[
+            ctypes.c_void_p,
+            ctypes.POINTER(POINTER_TYPE_INFO),
+            ctypes.wintypes.UINT,
+        ]
+        inject.restype=ctypes.wintypes.BOOL
+        destroy.argtypes=[ctypes.c_void_p]
+        destroy.restype=ctypes.wintypes.BOOL
+
+        device=create(PT_TOUCH, 1, POINTER_FEEDBACK_NONE)
+        if not device:
             return False
+
+        pointer_id=1
+        contact=ctypes.wintypes.RECT(sx-1, sy-1, sx+1, sy+1)
 
         try:
-            if not user32.SetCursorPos(screen[0], screen[1]):
+            info=POINTER_TYPE_INFO()
+            info.type=PT_TOUCH
+            info.touchInfo.pointerInfo.pointerType=PT_TOUCH
+            info.touchInfo.pointerInfo.pointerId=pointer_id
+            info.touchInfo.pointerInfo.frameId=1
+            info.touchInfo.pointerInfo.pointerFlags=(
+                POINTER_FLAG_NEW |
+                POINTER_FLAG_INRANGE |
+                POINTER_FLAG_INCONTACT |
+                POINTER_FLAG_PRIMARY |
+                POINTER_FLAG_DOWN
+            )
+            info.touchInfo.pointerInfo.sourceDevice=device
+            info.touchInfo.pointerInfo.hwndTarget=hwnd
+            info.touchInfo.pointerInfo.ptPixelLocation=ctypes.wintypes.POINT(sx, sy)
+            info.touchInfo.pointerInfo.ptPixelLocationRaw=ctypes.wintypes.POINT(sx, sy)
+            info.touchInfo.pointerInfo.dwTime=0
+            info.touchInfo.pointerInfo.historyCount=0
+            info.touchInfo.pointerInfo.inputData=0
+            info.touchInfo.pointerInfo.dwKeyStates=0
+            info.touchInfo.pointerInfo.PerformanceCount=0
+            info.touchInfo.pointerInfo.ButtonChangeType=0
+            info.touchInfo.touchFlags=0
+            info.touchInfo.touchMask=TOUCH_MASK_CONTACT | TOUCH_MASK_PRESSURE
+            info.touchInfo.rcContact=contact
+            info.touchInfo.rcContactRaw=contact
+            info.touchInfo.orientation=0
+            info.touchInfo.pressure=1024
+
+            if not inject(device, ctypes.byref(info), 1):
                 return False
 
-            lp=pack_xy(x, y)
+            # Reuse the same synthetic pointer ID for the release.
+            info.touchInfo.pointerInfo.pointerFlags=POINTER_FLAG_UP | POINTER_FLAG_PRIMARY
+            info.touchInfo.pointerInfo.ptPixelLocation=ctypes.wintypes.POINT(sx, sy)
+            info.touchInfo.pointerInfo.ptPixelLocationRaw=ctypes.wintypes.POINT(sx, sy)
+            info.touchInfo.pointerInfo.dwTime=1
 
-            # Synchronous delivery is intentional: Unity must process the
-            # message while the real cursor is at the requested point.
-            user32.SendMessageW(hwnd, WM_MOUSEMOVE, 0, lp)
-            user32.SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp)
-            user32.SendMessageW(hwnd, WM_LBUTTONUP, 0, lp)
+            if not inject(device, ctypes.byref(info), 1):
+                return False
+
             return True
         finally:
-            # Restore immediately after Unity returns from the synchronous
-            # mouse messages. No delay is introduced here.
-            user32.SetCursorPos(old_x, old_y)
+            destroy(device)
     except Exception:
         return False
 
