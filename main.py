@@ -220,6 +220,43 @@ def grab_window(hwnd):
         if hwnddc:
             try: user32.ReleaseDC(hwnd,hwnddc)
             except Exception: pass
+    # Second fallback: BitBlt from the window DC. This can work for
+    # classic/GDI-rendered windows where PrintWindow is unavailable.
+    try:
+        hwnddc=user32.GetDC(hwnd)
+        memdc=gdi32.CreateCompatibleDC(hwnddc) if hwnddc else 0
+        bmp=gdi32.CreateCompatibleBitmap(hwnddc,w,h) if hwnddc and memdc else 0
+        old=gdi32.SelectObject(memdc,bmp) if bmp else 0
+        if bmp and gdi32.BitBlt(memdc,0,0,w,h,hwnddc,0,0,0x00CC0020):
+            class BITMAPINFOHEADER2(ctypes.Structure):
+                _fields_=[('biSize',ctypes.wintypes.DWORD),('biWidth',ctypes.wintypes.LONG),('biHeight',ctypes.wintypes.LONG),('biPlanes',ctypes.wintypes.WORD),('biBitCount',ctypes.wintypes.WORD),('biCompression',ctypes.wintypes.DWORD),('biSizeImage',ctypes.wintypes.DWORD),('biXPelsPerMeter',ctypes.wintypes.LONG),('biYPelsPerMeter',ctypes.wintypes.LONG),('biClrUsed',ctypes.wintypes.DWORD),('biClrImportant',ctypes.wintypes.DWORD)]
+            class BITMAPINFO2(ctypes.Structure):
+                _fields_=[('bmiHeader',BITMAPINFOHEADER2),('bmiColors',ctypes.c_uint32*3)]
+            bmi=BITMAPINFO2(); bmi.bmiHeader.biSize=ctypes.sizeof(BITMAPINFOHEADER2)
+            bmi.bmiHeader.biWidth=w; bmi.bmiHeader.biHeight=-h; bmi.bmiHeader.biPlanes=1
+            bmi.bmiHeader.biBitCount=32; bmi.bmiHeader.biCompression=0
+            buf=(ctypes.c_ubyte*(w*h*4))()
+            if gdi32.GetDIBits(memdc,bmp,0,h,ctypes.byref(buf),ctypes.byref(bmi),0)>0:
+                arr=np.frombuffer(buf,dtype=np.uint8).reshape((h,w,4))
+                img=cv2.cvtColor(arr,cv2.COLOR_BGRA2BGR)
+                gray=cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
+                if float(gray.std())>2.0 and float(gray.mean())>1.0:
+                    return img
+        if bmp:
+            try: gdi32.SelectObject(memdc,old); gdi32.DeleteObject(bmp)
+            except Exception: pass
+        if memdc:
+            try: gdi32.DeleteDC(memdc)
+            except Exception: pass
+        if hwnddc:
+            try: user32.ReleaseDC(hwnd,hwnddc)
+            except Exception: pass
+    except Exception:
+        try:
+            if hwnddc: user32.ReleaseDC(hwnd,hwnddc)
+        except Exception: pass
+
+    # Final fallback: capture the actual visible client rectangle.
     try:
         pt=ctypes.wintypes.POINT(0,0)
         if not user32.ClientToScreen(hwnd,ctypes.byref(pt)): return None
