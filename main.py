@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
+BUILD_ID = "2026-09-20-IMGDEBUG-01"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -565,7 +566,8 @@ class MacroWorker(threading.Thread):
             time.sleep(.02)
     def run(self):
         mode=self.settings['mode']; repeat=self.settings['repeat']; until=time.monotonic()+self.settings['minutes']*60 if mode=='time' else None; count=0
-        self.sig.run.emit(f"[{now()}] 재생 시작")
+        self.sig.run.emit(f"[{now()}] 재생 시작 [BUILD {BUILD_ID}]")
+        self.sig.run.emit(f"[{now()}] Worker 코드 확인: 이미지 인식 진단 버전")
         if self.background:
             self.sig.run.emit(f"[{now()}] 백그라운드 대상 고정: HWND={self.target_hwnd}, 창={self.target_title}, 프로세스={self.target_process}")
         try:
@@ -649,6 +651,39 @@ class MacroWorker(threading.Thread):
                                 if found: break
                                 time.sleep(.08)
                             if found: break
+                            # Detailed diagnostics: tell us whether the target window
+                            # can actually be captured and what OpenCV score is seen.
+                            try:
+                                if self.background and self.target_hwnd:
+                                    dbg_template=cv_image(st.path)
+                                    dbg_screen=grab_window(self.target_hwnd)
+                                    if dbg_template is None:
+                                        self.sig.run.emit(f"[{now()}] 이미지 진단: 템플릿 로드 실패 | path={st.path}")
+                                    elif dbg_screen is None:
+                                        self.sig.run.emit(f"[{now()}] 이미지 진단: 대상 창 캡처 실패 | HWND={self.target_hwnd}")
+                                    else:
+                                        dbg_region=screen_region_to_client(st.region, self.target_hwnd)
+                                        ds=dbg_screen
+                                        if dbg_region[2]>0 and dbg_region[3]>0:
+                                            rx,ry,rw,rh=map(int,dbg_region)
+                                            rx=max(0,rx); ry=max(0,ry)
+                                            rw=min(rw,ds.shape[1]-rx); rh=min(rh,ds.shape[0]-ry)
+                                            ds=ds[ry:ry+rh,rx:rx+rw]
+                                        if ds.shape[0] < dbg_template.shape[0] or ds.shape[1] < dbg_template.shape[1]:
+                                            self.sig.run.emit(f"[{now()}] 이미지 진단: 캡처={ds.shape[1]}x{ds.shape[0]}, 템플릿={dbg_template.shape[1]}x{dbg_template.shape[0]} → 템플릿이 더 큼")
+                                        else:
+                                            dgs=cv2.cvtColor(ds,cv2.COLOR_BGR2GRAY)
+                                            dgt=cv2.cvtColor(dbg_template,cv2.COLOR_BGR2GRAY)
+                                            _,max_score,_,max_loc=cv2.minMaxLoc(cv2.matchTemplate(dgs,dgt,cv2.TM_CCOEFF_NORMED))
+                                            self.sig.run.emit(f"[{now()}] 이미지 진단: 캡처={ds.shape[1]}x{ds.shape[0]}, 템플릿={dbg_template.shape[1]}x{dbg_template.shape[0]}, 최고점수={max_score:.3f}, 기준={st.accuracy:.3f}, 검색영역={dbg_region}")
+                                            try:
+                                                debug_path=DATA_DIR / "debug_last_capture.png"
+                                                cv2.imwrite(str(debug_path), ds)
+                                                self.sig.run.emit(f"[{now()}] 이미지 진단 캡처 저장: {debug_path}")
+                                            except Exception as dbg_save_err:
+                                                self.sig.run.emit(f"[{now()}] 이미지 진단 캡처 저장 실패: {type(dbg_save_err).__name__}: {dbg_save_err}")
+                            except Exception as dbg_err:
+                                self.sig.run.emit(f"[{now()}] 이미지 진단 예외: {type(dbg_err).__name__}: {dbg_err}")
                             action=getattr(st,'failure_action','retry')
                             if action == 'retry' and attempts < max(0, int(getattr(st,'retry_count',3))):
                                 attempts += 1
@@ -718,7 +753,7 @@ class MainWindow(QMainWindow):
         self.update_button_states()
         self.refresh_groups(); self.refresh_image_list(); self.setup_hotkeys()
         self._mark_chain_clean()
-        self.log_event("프로그램 준비 완료. 사용할 탭을 선택하고 시작하세요.")
+        self.log_event(f"프로그램 준비 완료. 사용할 탭을 선택하고 시작하세요. [BUILD {BUILD_ID}]")
     def setup_hotkeys(self):
         def on_press(key):
             try:
