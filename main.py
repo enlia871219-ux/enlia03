@@ -580,7 +580,7 @@ class MacroWorker(threading.Thread):
                     self.sig.step.emit(i)
                     st=self.steps[i]
                     forced_step=False
-                    while self.pause_evt.is_set() and not self.stop_evt.is_set():
+                    while not self.pause_evt.is_set() and not self.stop_evt.is_set():
                         request=None
                         with self.step_lock:
                             request=self.step_request
