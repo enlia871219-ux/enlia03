@@ -566,6 +566,8 @@ class MacroWorker(threading.Thread):
     def run(self):
         mode=self.settings['mode']; repeat=self.settings['repeat']; until=time.monotonic()+self.settings['minutes']*60 if mode=='time' else None; count=0
         self.sig.run.emit(f"[{now()}] 재생 시작")
+        if self.background:
+            self.sig.run.emit(f"[{now()}] 백그라운드 대상 고정: HWND={self.target_hwnd}, 창={self.target_title}, 프로세스={self.target_process}")
         try:
             while not self.stop_evt.is_set():
                 if mode=='count' and count>=repeat: break
@@ -602,8 +604,12 @@ class MacroWorker(threading.Thread):
                     if not self.pause_evt.is_set() and not forced_step:
                         continue
                     if not st.enabled:
+                        self.sig.run.emit(f"[{now()}] 단계 {i+1}/{len(self.steps)} 건너뜀: 사용 안 함")
                         i += 1; continue
-                    self.sig.run.emit(f"[{now()}] 단계 {i+1}/{len(self.steps)}: {st.name}")
+                    if st.type == 'image':
+                        self.sig.run.emit(f"[{now()}] 단계 {i+1}/{len(self.steps)}: {st.name} | type=image | path={st.path} | 정확도={st.accuracy:.2f} | 대기={self.settings['image_wait']:.2f}s | 영역={st.region}")
+                    else:
+                        self.sig.run.emit(f"[{now()}] 단계 {i+1}/{len(self.steps)}: {st.name} | type={st.type} | enabled={st.enabled}")
                     next_i = i + 1
                     if st.type=='recording':
                         self.sig.run.emit(f"[{now()}] 녹화 매크로 실행: {st.name} ({len(st.events)}개 동작)")
@@ -1078,21 +1084,10 @@ class MainWindow(QMainWindow):
         buf=ctypes.create_unicode_buffer(n+1); user32.GetWindowTextW(hwnd, buf, n+1); return buf.value
 
     def _track_foreground_window(self):
-        if os.name != 'nt': return
-        try:
-            # Once the user explicitly selected a target window, never replace it
-            # merely because the macro application's own window became foreground.
-            # Previously this silently changed MabinogiMobile -> Whale and caused
-            # background playback to capture/click the wrong window.
-            current=int(getattr(self, '_last_target_hwnd', 0) or 0)
-            if current and ctypes.windll.user32.IsWindow(current):
-                return
-            hwnd=int(ctypes.windll.user32.GetForegroundWindow())
-            own=int(self.winId())
-            if hwnd and hwnd != own and ctypes.windll.user32.IsWindowVisible(hwnd):
-                self._last_target_hwnd=hwnd
-        except Exception:
-            pass
+        # Target selection is explicit. Do not infer/replace the target from
+        # whichever window happens to be foreground. This caused the selected
+        # Mabinogi Mobile HWND to be replaced by the macro window/other windows.
+        return
 
     def _set_target_status(self, ok, text):
         if hasattr(self, 'target_status'):
@@ -1245,19 +1240,32 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self,'재생','재생할 매크로가 없습니다.')
             return
         settings=self.settings()
-        self.runlog(f"[{now()}] 재생 설정 확인: 단계={len(self.steps)}, 백그라운드={settings.get('background')}, 대상HWND={settings.get('target_hwnd')}, 대상창={settings.get('target_title')} [{settings.get('target_process')}]")
+        selected_hwnd=int(getattr(self,'_last_target_hwnd',0) or 0)
+        self.runlog(f"[{now()}] 재생 설정 확인: 단계={len(self.steps)}, 백그라운드={settings.get('background')}, 선택HWND={selected_hwnd}, 대상창={settings.get('target_title')} [{settings.get('target_process')}]")
         if settings.get('background'):
-            hwnd=int(getattr(self,'_last_target_hwnd',0) or 0)
+            # The explicitly selected HWND is the single source of truth.
+            # Never replace it with the foreground window or the macro app HWND.
+            hwnd=selected_hwnd
+            title_filter=settings.get('target_title','')
+            proc_filter=settings.get('target_process','')
             if not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
-                hwnd=find_window_by_title(settings.get('target_title',''), settings.get('target_process',''))
+                hwnd=find_window_by_title(title_filter, proc_filter)
+            elif not _window_matches(hwnd, title_filter, proc_filter):
+                self.runlog(f'[{now()}] 선택 HWND 검증 불일치: HWND={hwnd} → 제목/프로세스로 재탐색')
+                hwnd=find_window_by_title(title_filter, proc_filter)
             if not hwnd:
                 self._set_target_status(False, '✗ 대상 창을 찾지 못했습니다.')
                 self.runlog(f'[{now()}] 백그라운드 재생 시작 실패: 대상 HWND가 없습니다.')
                 QMessageBox.warning(self,'백그라운드 재생','선택된 대상 창을 찾지 못했습니다.\n\n창 선택에서 대상 창을 다시 선택해주세요.')
                 return
-            settings['target_hwnd']=int(hwnd)
+            hwnd=int(hwnd)
+            self._last_target_hwnd=hwnd
+            settings['target_hwnd']=hwnd
             title=self.foreground_window_title_for(hwnd); proc=window_process_name(hwnd)
+            self.target_title.setText(title)
+            self.target_process.setText(proc)
             self._set_target_status(True, f'✓ 재생 대상 확인: {title}  [{proc or "프로세스명 읽기 실패"}]')
+            self.runlog(f'[{now()}] 재생 대상 고정: HWND={hwnd}, 창={title}, 프로세스={proc}')
             self.log_event(f'[{now()}] 재생 대상 확인: HWND={hwnd}, 창={title}, 프로세스={proc}')
         try:
             # Keep the QObject alive explicitly for the entire worker lifetime.
