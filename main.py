@@ -153,40 +153,78 @@ def window_client_origin(hwnd):
 
 
 def background_click(hwnd, x, y):
-    """Post a normal left-click to a window's client coordinates without moving the real cursor."""
-    if os.name != 'nt' or not hwnd: return False
+    """Send a client-coordinate left click without moving the real cursor."""
+    if os.name != 'nt' or not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
+        return False
     user32=ctypes.windll.user32
-    lparam=(int(y) << 16) | (int(x) & 0xFFFF)
-    user32.PostMessageW(hwnd, 0x0201, 0x0001, lparam)  # WM_LBUTTONDOWN / MK_LBUTTON
-    user32.PostMessageW(hwnd, 0x0202, 0x0000, lparam)  # WM_LBUTTONUP
-    return True
+    x=int(x); y=int(y)
+    lparam=(y << 16) | (x & 0xFFFF)
+    ok_down=bool(user32.PostMessageW(hwnd, 0x0201, 0x0001, lparam))
+    ok_up=bool(user32.PostMessageW(hwnd, 0x0202, 0x0000, lparam))
+    if ok_down and ok_up:
+        return True
+    try:
+        ok_down=bool(user32.SendMessageW(hwnd, 0x0201, 0x0001, lparam))
+        ok_up=bool(user32.SendMessageW(hwnd, 0x0202, 0x0000, lparam))
+        return ok_down and ok_up
+    except Exception:
+        return False
 
 
 def grab_window(hwnd):
-    """Capture a Windows client area using PrintWindow. Some games/renderers may not expose pixels this way."""
-    if os.name != 'nt' or not hwnd: return None
+    """Capture the client area with PrintWindow, then fall back to MSS for GPU-rendered windows."""
+    if os.name != 'nt' or not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
+        return None
     user32=ctypes.windll.user32; gdi32=ctypes.windll.gdi32
     rc=ctypes.wintypes.RECT()
-    if not user32.GetClientRect(hwnd, ctypes.byref(rc)): return None
-    w,h=rc.right-rc.left, rc.bottom-rc.top
+    if not user32.GetClientRect(hwnd, ctypes.byref(rc)):
+        return None
+    w,h=rc.right-rc.left,rc.bottom-rc.top
     if w<=0 or h<=0: return None
-    hwnddc=user32.GetDC(hwnd); memdc=gdi32.CreateCompatibleDC(hwnddc); bmp=gdi32.CreateCompatibleBitmap(hwnddc,w,h); old=gdi32.SelectObject(memdc,bmp)
+    hwnddc=user32.GetDC(hwnd)
+    memdc=gdi32.CreateCompatibleDC(hwnddc) if hwnddc else 0
+    bmp=gdi32.CreateCompatibleBitmap(hwnddc,w,h) if hwnddc and memdc else 0
+    old=gdi32.SelectObject(memdc,bmp) if bmp else 0
     try:
-        # 2 = PW_RENDERFULLCONTENT (best effort for minimized/occluded windows)
-        ok=user32.PrintWindow(hwnd, memdc, 2)
-        if not ok: ok=user32.PrintWindow(hwnd, memdc, 0)
-        if not ok: return None
-        class BITMAPINFOHEADER(ctypes.Structure):
-            _fields_=[('biSize',ctypes.wintypes.DWORD),('biWidth',ctypes.wintypes.LONG),('biHeight',ctypes.wintypes.LONG),('biPlanes',ctypes.wintypes.WORD),('biBitCount',ctypes.wintypes.WORD),('biCompression',ctypes.wintypes.DWORD),('biSizeImage',ctypes.wintypes.DWORD),('biXPelsPerMeter',ctypes.wintypes.LONG),('biYPelsPerMeter',ctypes.wintypes.LONG),('biClrUsed',ctypes.wintypes.DWORD),('biClrImportant',ctypes.wintypes.DWORD)]
-        class BITMAPINFO(ctypes.Structure):
-            _fields_=[('bmiHeader',BITMAPINFOHEADER),('bmiColors',ctypes.c_uint32*3)]
-        bmi=BITMAPINFO(); bmi.bmiHeader.biSize=ctypes.sizeof(BITMAPINFOHEADER); bmi.bmiHeader.biWidth=w; bmi.bmiHeader.biHeight=-h; bmi.bmiHeader.biPlanes=1; bmi.bmiHeader.biBitCount=32; bmi.bmiHeader.biCompression=0
-        buf=(ctypes.c_ubyte*(w*h*4))()
-        if gdi32.GetDIBits(memdc,bmp,0,h,ctypes.byref(buf),ctypes.byref(bmi),0)<=0: return None
-        arr=np.frombuffer(buf,dtype=np.uint8).reshape((h,w,4))
-        return cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+        ok=False
+        if bmp:
+            ok=bool(user32.PrintWindow(hwnd,memdc,2))
+            if not ok: ok=bool(user32.PrintWindow(hwnd,memdc,0))
+        if ok:
+            class BITMAPINFOHEADER(ctypes.Structure):
+                _fields_=[('biSize',ctypes.wintypes.DWORD),('biWidth',ctypes.wintypes.LONG),('biHeight',ctypes.wintypes.LONG),('biPlanes',ctypes.wintypes.WORD),('biBitCount',ctypes.wintypes.WORD),('biCompression',ctypes.wintypes.DWORD),('biSizeImage',ctypes.wintypes.DWORD),('biXPelsPerMeter',ctypes.wintypes.LONG),('biYPelsPerMeter',ctypes.wintypes.LONG),('biClrUsed',ctypes.wintypes.DWORD),('biClrImportant',ctypes.wintypes.DWORD)]
+            class BITMAPINFO(ctypes.Structure):
+                _fields_=[('bmiHeader',BITMAPINFOHEADER),('bmiColors',ctypes.c_uint32*3)]
+            bmi=BITMAPINFO(); bmi.bmiHeader.biSize=ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.bmiHeader.biWidth=w; bmi.bmiHeader.biHeight=-h; bmi.bmiHeader.biPlanes=1
+            bmi.bmiHeader.biBitCount=32; bmi.bmiHeader.biCompression=0
+            buf=(ctypes.c_ubyte*(w*h*4))()
+            if gdi32.GetDIBits(memdc,bmp,0,h,ctypes.byref(buf),ctypes.byref(bmi),0)>0:
+                arr=np.frombuffer(buf,dtype=np.uint8).reshape((h,w,4))
+                img=cv2.cvtColor(arr,cv2.COLOR_BGRA2BGR)
+                gray=cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
+                if float(gray.std())>2.0 and float(gray.mean())>1.0:
+                    return img
+    except Exception:
+        pass
     finally:
-        gdi32.SelectObject(memdc,old); gdi32.DeleteObject(bmp); gdi32.DeleteDC(memdc); user32.ReleaseDC(hwnd,hwnddc)
+        if bmp:
+            try: gdi32.SelectObject(memdc,old); gdi32.DeleteObject(bmp)
+            except Exception: pass
+        if memdc:
+            try: gdi32.DeleteDC(memdc)
+            except Exception: pass
+        if hwnddc:
+            try: user32.ReleaseDC(hwnd,hwnddc)
+            except Exception: pass
+    try:
+        pt=ctypes.wintypes.POINT(0,0)
+        if not user32.ClientToScreen(hwnd,ctypes.byref(pt)): return None
+        with mss.mss() as sct:
+            shot=np.array(sct.grab({"left":int(pt.x),"top":int(pt.y),"width":int(w),"height":int(h)}))
+        return cv2.cvtColor(shot,cv2.COLOR_BGRA2BGR)
+    except Exception:
+        return None
 
 
 def find_image_background(path, accuracy, region, hwnd):
@@ -544,6 +582,8 @@ class MacroWorker(threading.Thread):
                                 if self.background:
                                     if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
                                     found=find_image_background(st.path, st.accuracy, st.region, self.target_hwnd) if self.target_hwnd else None
+                                    if found is None and self.target_hwnd:
+                                        self.sig.run.emit(f"[{now()}] 이미지 검색 실패: 캡처/템플릿 매칭 결과 없음 (정확도 기준 {st.accuracy:.2f})")
                                     if found is None and attempts == 0 and time.monotonic() + 0.1 >= deadline:
                                         self.sig.run.emit(f"[{now()}] 이미지 검색: 대상 창 캡처/인식 결과 없음")
                                 else:
