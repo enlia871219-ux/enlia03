@@ -792,15 +792,29 @@ class MacroWorker(threading.Thread):
                 if self.stop_evt.is_set(): break
                 self._wait(self.settings['cycle_wait'])
         except Exception as e:
-            self.sig.run.emit(f"[{now()}] 오류: {e}")
-        self.sig.run.emit(f"[{now()}] 재생 종료"); self.sig.finished.emit()
+            try:
+                self.sig.run.emit(f"[{now()}] Worker 오류: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+        finally:
+            try:
+                self.sig.run.emit(f"[{now()}] 재생 종료")
+            except Exception:
+                pass
+            try:
+                self.sig.finished.emit()
+            except Exception:
+                pass
 
 class MainWindow(QMainWindow):
+    hotkey_action = Signal(str)
+
     def __init__(self):
         super().__init__(); self.setWindowTitle(APP_NAME); self.resize(1460, 980); self.setMinimumSize(1180,760)
         self.steps=[]; self.groups=[]
         self.worker=None
         self._worker_signals=None
+        self._stopping=False
         self.playing=False
         self.recording=False
         self.record_listener=None
@@ -825,15 +839,46 @@ class MainWindow(QMainWindow):
         self._mark_chain_clean()
         self.log_event(f"프로그램 준비 완료. 사용할 탭을 선택하고 시작하세요. [BUILD {BUILD_ID}]")
     def setup_hotkeys(self):
+        # pynput callbacks run outside the Qt GUI thread. Calling Qt widgets
+        # directly from that callback is unsafe and can cause intermittent
+        # process termination, especially when F4 stops playback.
+        self.hotkey_action.connect(self._handle_hotkey_action)
+
         def on_press(key):
             try:
-                if key==keyboard.Key.f1: self.start_record()
-                elif key==keyboard.Key.f2: self.stop_record()
-                elif key==keyboard.Key.f3: self.start_play()
-                elif key==keyboard.Key.f4: self.stop_play()
-                elif key==keyboard.Key.f5: self.toggle_pause()
-            except Exception: pass
-        self.hotkey_listener=keyboard.Listener(on_press=on_press); self.hotkey_listener.daemon=True; self.hotkey_listener.start()
+                action = {
+                    keyboard.Key.f1: 'start_record',
+                    keyboard.Key.f2: 'stop_record',
+                    keyboard.Key.f3: 'start_play',
+                    keyboard.Key.f4: 'stop_play',
+                    keyboard.Key.f5: 'toggle_pause',
+                }.get(key)
+                if action:
+                    self.hotkey_action.emit(action)
+            except Exception:
+                pass
+
+        self.hotkey_listener=keyboard.Listener(on_press=on_press)
+        self.hotkey_listener.daemon=True
+        self.hotkey_listener.start()
+
+    def _handle_hotkey_action(self, action):
+        try:
+            if action == 'start_record':
+                self.start_record()
+            elif action == 'stop_record':
+                self.stop_record()
+            elif action == 'start_play':
+                self.start_play()
+            elif action == 'stop_play':
+                self.stop_play()
+            elif action == 'toggle_pause':
+                self.toggle_pause()
+        except Exception as e:
+            try:
+                self.runlog(f'[{now()}] 단축키 처리 예외: {type(e).__name__}: {e}')
+            except Exception:
+                pass
     def apply_style(self):
         self.setStyleSheet('''
         QWidget{font-family:"Malgun Gothic";font-size:13px;color:#243447;} QMainWindow{background:#edf3fb;}
@@ -1435,21 +1480,47 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self,'재생 시작 오류',f'재생을 시작하지 못했습니다.\n\n{type(e).__name__}: {e}')
 
     def _play_finished(self):
-        self.playing=False
-        self.clear_step_highlight()
-        self.runlog(f'[{now()}] 실행 스레드 종료')
-        self.update_button_states()
+        try:
+            self.playing=False
+            self._stopping=False
+            self.clear_step_highlight()
+            self.runlog(f'[{now()}] 실행 스레드 종료')
+            self.update_button_states()
+        except Exception as e:
+            try:
+                self.runlog(f'[{now()}] 재생 종료 UI 정리 예외: {type(e).__name__}: {e}')
+            except Exception:
+                pass
 
     def stop_play(self):
-        if self.worker and self.worker.is_alive():
-            self.worker.stop(); self.log_event(f'[{now()}] 재생 중지 요청')
-        self.playing=False
-        self.clear_step_highlight()
-        if self.worker:
-            self.worker._paused=False
-        # Always restore the normal Play/Pause button state after Stop.
-        self.pause_btn.setText('일시정지 (F5)') if hasattr(self, 'pause_btn') else None
-        self.update_button_states()
+        # Stop is deliberately idempotent. Repeated clicks/hotkeys during worker
+        # shutdown must not race with playback state cleanup.
+        try:
+            worker = self.worker
+            if worker and worker.is_alive():
+                worker.stop()
+                self.log_event(f'[{now()}] 재생 중지 요청')
+            elif self.playing:
+                self.log_event(f'[{now()}] 재생 중지: 실행 중인 Worker가 없습니다.')
+            self.playing=False
+            self._stopping=True
+            self.clear_step_highlight()
+            if hasattr(self, 'pause_btn'):
+                self.pause_btn.setText('일시정지 (F5)')
+            self.update_button_states()
+        except Exception as e:
+            # A stop request must never propagate an exception into the Qt event
+            # handler and terminate the GUI.
+            self.playing=False
+            self._stopping=True
+            try:
+                self.clear_step_highlight()
+                if hasattr(self, 'pause_btn'):
+                    self.pause_btn.setText('일시정지 (F5)')
+                self.update_button_states()
+                self.runlog(f'[{now()}] 재생 중지 처리 예외: {type(e).__name__}: {e}')
+            except Exception:
+                pass
 
     def toggle_pause(self):
         if not self.worker or not self.worker.is_alive(): return
