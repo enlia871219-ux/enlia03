@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-09-20-IMGDEBUG-02"
+BUILD_ID = "2026-09-20-IMGDEBUG-03"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -154,26 +154,74 @@ def window_client_origin(hwnd):
 
 
 def background_click(hwnd, x, y):
-    """Send a client-coordinate left click without moving the real cursor."""
+    """Send a synchronous Win32 mouse click to the target/child window.
+    PostMessage returning True only means the message was queued; it does not
+    mean the game processed it, so synchronous SendMessage is attempted first."""
     if os.name != 'nt' or not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
         return False
     user32=ctypes.windll.user32
     x=int(x); y=int(y)
-    lparam=(y << 16) | (x & 0xFFFF)
-    # Send a move first; some window procedures only accept clicks after
-    # receiving a mouse-position update.
-    user32.PostMessageW(hwnd, 0x0200, 0, lparam)  # WM_MOUSEMOVE
-    ok_down=bool(user32.PostMessageW(hwnd, 0x0201, 0x0001, lparam))
-    ok_up=bool(user32.PostMessageW(hwnd, 0x0202, 0x0000, lparam))
-    if ok_down and ok_up:
-        return True
-    try:
-        ok_down=bool(user32.SendMessageW(hwnd, 0x0201, 0x0001, lparam))
-        ok_up=bool(user32.SendMessageW(hwnd, 0x0202, 0x0000, lparam))
-        return ok_down and ok_up
-    except Exception:
+    if x < 0 or y < 0:
         return False
 
+    WM_MOUSEMOVE=0x0200
+    WM_LBUTTONDOWN=0x0201
+    WM_LBUTTONUP=0x0202
+    WM_MOUSEACTIVATE=0x0021
+    MK_LBUTTON=0x0001
+
+    def send_click(target, tx, ty):
+        lp=(int(ty) << 16) | (int(tx) & 0xFFFF)
+        # Tell the window which client position the mouse is over, then send
+        # the button messages synchronously. This is different from merely
+        # queueing PostMessage calls.
+        try:
+            user32.SendMessageW(target, WM_MOUSEACTIVATE, int(hwnd), 0)
+            user32.SendMessageW(target, WM_MOUSEMOVE, 0, lp)
+            down=user32.SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp)
+            up=user32.SendMessageW(target, WM_LBUTTONUP, 0, lp)
+            return True, int(down), int(up)
+        except Exception:
+            return False, 0, 0
+
+    # If the top-level window has a child at this point, send to the deepest
+    # child because many game launchers/render hosts receive mouse messages
+    # there instead of on the top-level HWND.
+    target=hwnd
+    tx,ty=x,y
+    try:
+        pt=ctypes.wintypes.POINT(x,y)
+        child=user32.ChildWindowFromPointEx(hwnd, pt, 0)
+        if child and int(child) != int(hwnd):
+            cpt=ctypes.wintypes.POINT(x,y)
+            user32.ScreenToClient(child, ctypes.byref(cpt)) if False else None
+            # ChildWindowFromPointEx returns coordinates relative to the parent.
+            # Convert the point to the child's client coordinates.
+            if user32.ClientToScreen(hwnd, ctypes.byref(cpt)):
+                user32.ScreenToClient(child, ctypes.byref(cpt))
+                target=int(child); tx,ty=int(cpt.x),int(cpt.y)
+    except Exception:
+        target=hwnd; tx,ty=x,y
+
+    ok,down,up=send_click(target,tx,ty)
+    if ok:
+        return True
+
+    # Fallback to the top-level HWND if the child path failed.
+    ok,down,up=send_click(hwnd,x,y)
+    if ok:
+        return True
+
+    # Last fallback: queue the messages for applications that only process
+    # mouse input from their message queue.
+    try:
+        lp=(y << 16) | (x & 0xFFFF)
+        user32.PostMessageW(hwnd, WM_MOUSEMOVE, 0, lp)
+        user32.PostMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp)
+        user32.PostMessageW(hwnd, WM_LBUTTONUP, 0, lp)
+        return True
+    except Exception:
+        return False
 
 def grab_window(hwnd):
     """Capture the client area with PrintWindow, then fall back to MSS for GPU-rendered windows."""
