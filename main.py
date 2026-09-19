@@ -362,7 +362,8 @@ class Group:
     chains: list[str] = field(default_factory=list)
 
 class Signals(QObject):
-    event = Signal(str)    run = Signal(str)
+    event = Signal(str)
+    run = Signal(str)
     status = Signal(str)
     finished = Signal()
     recorded = Signal(object)
