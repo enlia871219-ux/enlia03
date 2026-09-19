@@ -47,8 +47,9 @@ echo [2/3] Cleaning done.
 echo.
 echo [3/3] Building EXE...
 echo This can take several minutes.
+echo DEBUG BUILD: console enabled so startup errors will be visible.
 echo.
-%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name ShadeLawcroV1 --distpath "%CD%" --workpath "%CD%\build" --specpath "%CD%" --add-data "assets;assets" --icon "assets\pookuro.ico" --exclude-module PySide6.Qt3D --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick --exclude-module PySide6.QtQuick3D --exclude-module PySide6.QtWebEngine --exclude-module PySide6.QtAsyncio --exclude-module PySide6.QtAxContainer main.py
+%PY% -m PyInstaller --noconfirm --clean --onefile --console --name ShadeLawcroV1 --distpath "%CD%" --workpath "%CD%\build" --specpath "%CD%" --add-data "assets;assets" --icon "assets\pookuro.ico" --exclude-module PySide6.Qt3D --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick --exclude-module PySide6.QtQuick3D --exclude-module PySide6.QtWebEngine --exclude-module PySide6.QtAsyncio --exclude-module PySide6.QtAxContainer main.py
 set "BUILD_RC=%errorlevel%"
 
 echo.
