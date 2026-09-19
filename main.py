@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-09-20-IMGDEBUG-04"
+BUILD_ID = "2026-09-20-IMGDEBUG-05"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -154,10 +154,9 @@ def window_client_origin(hwnd):
 
 
 def background_click(hwnd, x, y):
-    """Try Win32 messages first, then perform a real foreground mouse click.
-    Unity/Mabinogi Mobile may ignore synthetic WM_LBUTTON messages, so the
-    fallback temporarily activates the selected target, injects a real click,
-    and restores the previous foreground window."""
+    """Dispatch a click to the selected window without activating it.
+    This intentionally never uses SetForegroundWindow/SendInput: the macro
+    must remain a true background macro even when another window is on top."""
     if os.name != 'nt' or not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
         return False
     user32=ctypes.windll.user32
@@ -171,101 +170,72 @@ def background_click(hwnd, x, y):
     WM_MOUSEACTIVATE=0x0021
     MK_LBUTTON=0x0001
 
-    def send_click(target, tx, ty):
+    def client_point(target, screen_x, screen_y):
+        p=ctypes.wintypes.POINT(int(screen_x),int(screen_y))
+        if user32.ScreenToClient(target,ctypes.byref(p)):
+            return int(p.x),int(p.y)
+        return None
+
+    def descend_child(parent, px, py):
+        """Return deepest child under a point, with coordinates relative to it."""
+        target=int(parent)
+        tx,ty=int(px),int(py)
+        for _ in range(16):
+            child=user32.ChildWindowFromPointEx(
+                target,
+                ctypes.wintypes.POINT(tx,ty),
+                0
+            )
+            if not child or int(child)==target:
+                break
+            child=int(child)
+            # Convert current child-relative point -> screen -> child-relative.
+            screen=ctypes.wintypes.POINT(tx,ty)
+            if not user32.ClientToScreen(target,ctypes.byref(screen)):
+                break
+            cp=client_point(child,screen.x,screen.y)
+            if cp is None:
+                break
+            target=child
+            tx,ty=cp
+        return target,tx,ty
+
+    def dispatch(target,tx,ty):
         lp=(int(ty) << 16) | (int(tx) & 0xFFFF)
         try:
-            user32.SendMessageW(target, WM_MOUSEACTIVATE, int(hwnd), 0)
-            user32.SendMessageW(target, WM_MOUSEMOVE, 0, lp)
-            user32.SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp)
-            user32.SendMessageW(target, WM_LBUTTONUP, 0, lp)
+            # Synchronous path first.
+            user32.SendMessageW(target,WM_MOUSEACTIVATE,int(hwnd),0)
+            user32.SendMessageW(target,WM_MOUSEMOVE,0,lp)
+            user32.SendMessageW(target,WM_LBUTTONDOWN,MK_LBUTTON,lp)
+            user32.SendMessageW(target,WM_LBUTTONUP,0,lp)
+            # Also queue the same messages. Some Unity message pumps consume
+            # queued mouse messages instead of synchronous sends.
+            user32.PostMessageW(target,WM_MOUSEMOVE,0,lp)
+            user32.PostMessageW(target,WM_LBUTTONDOWN,MK_LBUTTON,lp)
+            user32.PostMessageW(target,WM_LBUTTONUP,0,lp)
             return True
         except Exception:
             return False
 
-    # Try the selected top-level window first. For normal Win32 controls this
-    # is enough and does not move the real cursor.
-    if send_click(hwnd, x, y):
-        # Do not trust SendMessage's return value as proof that the game used
-        # the input. Unity can consume/ignore these messages silently.
-        pass
-
-    # Mabinogi Mobile/Unity can use raw/engine input instead of WM_LBUTTON*.
-    # In that case a real injected mouse click is required. Temporarily bring
-    # the selected window to the foreground, click its client coordinate, then
-    # restore whatever window was active before the macro click.
+    # If minimized, restore WITHOUT activation. Unity generally cannot provide
+    # a current rendered frame while minimized. The window remains non-focused;
+    # it can stay behind the user's active window.
     try:
         if user32.IsIconic(hwnd):
-            return False
-
-        old_fg=int(user32.GetForegroundWindow())
-        target=int(hwnd)
-
-        # Bring the exact selected window forward without changing the stored
-        # target HWND. Allow Windows a short moment to switch input focus.
-        user32.ShowWindow(target, 9)  # SW_RESTORE
-        user32.SetForegroundWindow(target)
-        time.sleep(0.04)
-
-        # Convert the image-match client coordinate to screen coordinates.
-        pt=ctypes.wintypes.POINT(x, y)
-        if not user32.ClientToScreen(target, ctypes.byref(pt)):
-            if old_fg and user32.IsWindow(old_fg):
-                user32.SetForegroundWindow(old_fg)
-            return False
-
-        # Move/click using SendInput. This is real Windows mouse input and is
-        # therefore visible to Unity/raw-input paths that ignore WM messages.
-        class MOUSEINPUT(ctypes.Structure):
-            _fields_=[
-                ('dx',ctypes.wintypes.LONG),
-                ('dy',ctypes.wintypes.LONG),
-                ('mouseData',ctypes.wintypes.DWORD),
-                ('dwFlags',ctypes.wintypes.DWORD),
-                ('time',ctypes.wintypes.DWORD),
-                ('dwExtraInfo',ctypes.POINTER(ctypes.wintypes.ULONG)),
-            ]
-        class INPUT(ctypes.Structure):
-            _fields_=[
-                ('type',ctypes.wintypes.DWORD),
-                ('mi',MOUSEINPUT),
-            ]
-
-        INPUT_MOUSE=0
-        MOUSEEVENTF_MOVE=0x0001
-        MOUSEEVENTF_ABSOLUTE=0x8000
-        MOUSEEVENTF_LEFTDOWN=0x0002
-        MOUSEEVENTF_LEFTUP=0x0004
-        SM_CXSCREEN=0
-        SM_CYSCREEN=1
-        sw=max(1,int(user32.GetSystemMetrics(SM_CXSCREEN)))
-        sh=max(1,int(user32.GetSystemMetrics(SM_CYSCREEN)))
-        ax=clamp(round(pt.x*65535/(sw-1)),0,65535)
-        ay=clamp(round(pt.y*65535/(sh-1)),0,65535)
-
-        extra=ctypes.wintypes.ULONG(0)
-        inputs=(INPUT*3)()
-        inputs[0].type=INPUT_MOUSE
-        inputs[0].mi=MOUSEINPUT(ax,ay,0,MOUSEEVENTF_MOVE|MOUSEEVENTF_ABSOLUTE,0,ctypes.pointer(extra))
-        inputs[1].type=INPUT_MOUSE
-        inputs[1].mi=MOUSEINPUT(0,0,0,MOUSEEVENTF_LEFTDOWN,0,ctypes.pointer(extra))
-        inputs[2].type=INPUT_MOUSE
-        inputs[2].mi=MOUSEINPUT(0,0,0,MOUSEEVENTF_LEFTUP,0,ctypes.pointer(extra))
-        sent=user32.SendInput(3, ctypes.byref(inputs), ctypes.sizeof(INPUT))
-        time.sleep(0.03)
-
-        # Put the user's previously active window back. If there was no
-        # previous window, simply leave the target active.
-        if old_fg and old_fg != target and user32.IsWindow(old_fg):
-            user32.SetForegroundWindow(old_fg)
-
-        return int(sent) == 3
+            user32.ShowWindow(hwnd,4)  # SW_SHOWNOACTIVATE
+            time.sleep(0.15)
     except Exception:
-        try:
-            if old_fg and old_fg != int(hwnd) and user32.IsWindow(old_fg):
-                user32.SetForegroundWindow(old_fg)
-        except Exception:
-            pass
-        return False
+        pass
+
+    # Image coordinates are client coordinates. Dispatch to the deepest child
+    # under that point first, then the top-level window as a fallback.
+    target,tx,ty=descend_child(hwnd,x,y)
+    if dispatch(target,tx,ty):
+        return True
+    if target != int(hwnd):
+        return dispatch(int(hwnd),x,y)
+    return False
+
 
 def grab_window(hwnd):
     """Capture the client area with PrintWindow, then fall back to MSS for GPU-rendered windows."""
