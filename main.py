@@ -1080,10 +1080,19 @@ class MainWindow(QMainWindow):
     def _track_foreground_window(self):
         if os.name != 'nt': return
         try:
+            # Once the user explicitly selected a target window, never replace it
+            # merely because the macro application's own window became foreground.
+            # Previously this silently changed MabinogiMobile -> Whale and caused
+            # background playback to capture/click the wrong window.
+            current=int(getattr(self, '_last_target_hwnd', 0) or 0)
+            if current and ctypes.windll.user32.IsWindow(current):
+                return
             hwnd=int(ctypes.windll.user32.GetForegroundWindow())
             own=int(self.winId())
-            if hwnd and hwnd != own and ctypes.windll.user32.IsWindowVisible(hwnd): self._last_target_hwnd=hwnd
-        except Exception: pass
+            if hwnd and hwnd != own and ctypes.windll.user32.IsWindowVisible(hwnd):
+                self._last_target_hwnd=hwnd
+        except Exception:
+            pass
 
     def _set_target_status(self, ok, text):
         if hasattr(self, 'target_status'):
@@ -1150,6 +1159,7 @@ class MainWindow(QMainWindow):
             selected.update(hwnd=hwnd, title=title, proc=proc)
             # IMPORTANT: apply immediately, not after dlg.exec().
             self._last_target_hwnd = hwnd
+            self._target_window_locked = True
             self.target_title.setText(title)
             self.target_process.setText(proc)
             self._set_target_status(True, f'✓ 선택됨: {title}  [{proc or "프로세스명 읽기 실패"}]')
@@ -1235,7 +1245,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self,'재생','재생할 매크로가 없습니다.')
             return
         settings=self.settings()
-        self.runlog(f"[{now()}] 재생 설정 확인: 단계={len(self.steps)}, 백그라운드={settings.get('background')}, 대상HWND={settings.get('target_hwnd')}")
+        self.runlog(f"[{now()}] 재생 설정 확인: 단계={len(self.steps)}, 백그라운드={settings.get('background')}, 대상HWND={settings.get('target_hwnd')}, 대상창={settings.get('target_title')} [{settings.get('target_process')}]")
         if settings.get('background'):
             hwnd=int(getattr(self,'_last_target_hwnd',0) or 0)
             if not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
