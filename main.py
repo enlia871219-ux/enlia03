@@ -312,7 +312,8 @@ def background_click(hwnd, x, y):
 def grab_window(hwnd):
     """Capture the client area with PrintWindow, then fall back to MSS for GPU-rendered windows."""
     if os.name != 'nt' or not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
-        return None    user32=ctypes.windll.user32; gdi32=ctypes.windll.gdi32
+        return None
+    user32=ctypes.windll.user32; gdi32=ctypes.windll.gdi32
     rc=ctypes.wintypes.RECT()
     if not user32.GetClientRect(hwnd, ctypes.byref(rc)):
         return None
