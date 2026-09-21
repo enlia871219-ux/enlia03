@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-09-21-IMGDEBUG-09"
+BUILD_ID = "2026-09-21-IMGDEBUG-10"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -381,6 +381,8 @@ class Step:
     failure_action: str = "retry"  # retry / ignore / goto
     retry_count: int = 3
     retry_delay: float = 1.0
+    recognition_retry_count: int = 3
+    recognition_retry_delay: float = 1.0
     failure_target: int = 0  # zero-based step index
     events: list[dict] = field(default_factory=list)  # recorded macro events
 
@@ -515,7 +517,7 @@ class StepEditor(QDialog):
         self.cy = QSpinBox(); self.cy.setRange(-10000,10000); self.cy.setValue(step.click_y)
         info.addRow("이름", self.name); info.addRow("대기시간(초)", self.wait); info.addRow("이미지 대기(초)", self.image_wait); info.addRow("이미지 정확도", self.acc); info.addRow("클릭 위치", self.click)
         xy = QHBoxLayout(); xy.addWidget(self.cx); xy.addWidget(QLabel(",")); xy.addWidget(self.cy); xyw=QWidget(); xyw.setLayout(xy); info.addRow("상대 위치 X,Y", xyw)
-        info.addRow("이미지 인식 후 [초] 후 클릭 실행", self.click_delay)
+        info.addRow("인식 후 클릭 실행 대기(초)", self.click_delay)
         self.region_label = QLabel(self._region_text()); info.addRow("검색 영역", self.region_label)
         btn_region = QPushButton("화면에서 검색영역 지정")
         btn_click = QPushButton("화면에서 클릭 위치 지정")
@@ -523,6 +525,14 @@ class StepEditor(QDialog):
         top.addLayout(info, 1); root.addLayout(top)
         pathbox = QHBoxLayout(); self.path = QLineEdit(step.path); self.path.setReadOnly(True); pathbox.addWidget(self.path); root.addLayout(pathbox)
         root.addWidget(QLabel("※ SVG 파일도 미리보기 및 이미지 인식 대상으로 사용할 수 있습니다. SVG는 내부적으로 PNG로 렌더링됩니다."))
+
+        pre_retry_box = QGroupBox("다시 시도 횟수 설정")
+        pr = QGridLayout(pre_retry_box)
+        self.recognition_retry_count = QSpinBox(); self.recognition_retry_count.setRange(0, 999); self.recognition_retry_count.setValue(getattr(step, 'recognition_retry_count', 3))
+        self.recognition_retry_delay = QDoubleSpinBox(); self.recognition_retry_delay.setRange(0, 3600); self.recognition_retry_delay.setDecimals(2); self.recognition_retry_delay.setSingleStep(.1); self.recognition_retry_delay.setValue(getattr(step, 'recognition_retry_delay', 1.0))
+        pr.addWidget(QLabel("다시 시도 횟수"),0,0); pr.addWidget(self.recognition_retry_count,0,1)
+        pr.addWidget(QLabel("재시도 지연(초)"),0,2); pr.addWidget(self.recognition_retry_delay,0,3)
+        root.addWidget(pre_retry_box)
 
         failbox = QGroupBox("이미지 인식 실패 시 동작")
         fl = QGridLayout(failbox)
@@ -608,6 +618,8 @@ class StepEditor(QDialog):
         self.step.failure_action = ['retry','ignore','goto'][self.fail_action.currentIndex()]
         self.step.retry_count = self.retry_count.value()
         self.step.retry_delay = self.retry_delay.value()
+        self.step.recognition_retry_count = self.recognition_retry_count.value()
+        self.step.recognition_retry_delay = self.recognition_retry_delay.value()
         self.step.failure_target = max(0, self.fail_target.value()-1)
         super().accept()
 
@@ -804,6 +816,16 @@ class MacroWorker(threading.Thread):
                                                 self.sig.run.emit(f"[{now()}] 이미지 진단 캡처 저장 실패: {type(dbg_save_err).__name__}: {dbg_save_err}")
                             except Exception as dbg_err:
                                 self.sig.run.emit(f"[{now()}] 이미지 진단 예외: {type(dbg_err).__name__}: {dbg_err}")
+                            # First consume the dedicated image-recognition retry settings.
+                            # Only after those retries are exhausted do we apply the
+                            # separate "이미지 인식 실패 시 동작" setting below.
+                            recognition_retry_count=max(0, int(getattr(st,'recognition_retry_count',3)))
+                            if attempts < recognition_retry_count:
+                                attempts += 1
+                                delay=max(0,float(getattr(st,'recognition_retry_delay',1.0)))
+                                self.sig.run.emit(f"[{now()}] 이미지 인식 재시도: {st.name} → {attempts}/{recognition_retry_count} ({delay:.2f}초 후)")
+                                self._wait(delay)
+                                continue
                             action=getattr(st,'failure_action','retry')
                             if action == 'retry' and attempts < max(0, int(getattr(st,'retry_count',3))):
                                 attempts += 1
@@ -1050,13 +1072,21 @@ class MainWindow(QMainWindow):
         self.image_wait=QDoubleSpinBox(); self.image_wait.setRange(.1,3600); self.image_wait.setDecimals(2); self.image_wait.setValue(10); pl.addRow('새 이미지 기본 대기(초)',self.image_wait)
         self.default_acc=QDoubleSpinBox(); self.default_acc.setRange(.01,1); self.default_acc.setDecimals(2); self.default_acc.setValue(.80); pl.addRow('기본 이미지 정확도',self.default_acc)
         self.background_mode=QCheckBox('비활성(백그라운드) 입력 모드'); pl.addRow('입력 방식',self.background_mode)
-        targetrow=QHBoxLayout(); self.target_title=QLineEdit(); self.target_title.setPlaceholderText('창 이름(제목)'); targetrow.addWidget(self.target_title)
-        self.select_target_btn=QPushButton('창 선택...'); self.select_target_btn.clicked.connect(self.select_target_window); targetrow.addWidget(self.select_target_btn); self.pick_target_btn=QPushButton('현재 창 가져오기'); self.pick_target_btn.clicked.connect(self.pick_target_window); targetrow.addWidget(self.pick_target_btn)
-        tw=QWidget(); tw.setLayout(targetrow); pl.addRow('창 이름',tw)
+        self.target_title=QLineEdit(); self.target_title.setPlaceholderText('창 이름(제목)'); pl.addRow('창 이름',self.target_title)
+
         self.target_process=QLineEdit(); self.target_process.setPlaceholderText('프로세스 이름 예: Game.exe'); pl.addRow('프로세스 이름',self.target_process)
+
+        target_buttons=QHBoxLayout()
+        self.select_target_btn=QPushButton('창 선택'); self.select_target_btn.clicked.connect(self.select_target_window); target_buttons.addWidget(self.select_target_btn)
+        self.pick_target_btn=QPushButton('현재 창 가져오기'); self.pick_target_btn.clicked.connect(self.pick_target_window); target_buttons.addWidget(self.pick_target_btn)
+        target_buttons.addStretch()
+        target_buttons_widget=QWidget(); target_buttons_widget.setLayout(target_buttons); pl.addRow('',target_buttons_widget)
+
         self.target_status=QLabel('대상 창: 아직 선택되지 않음'); self.target_status.setStyleSheet('color:#666;font-weight:700;'); pl.addRow('선택 상태',self.target_status)
+
+        spacer=QWidget(); spacer.setFixedHeight(8); pl.addRow('',spacer)
         bg_note=QLabel('※ 비활성 모드는 실제 마우스를 움직이지 않고 Windows 백그라운드 메시지를 대상 창으로 보냅니다. 대상 프로그램이 이를 지원하지 않을 수 있습니다.')
-        bg_note.setWordWrap(True); bg_note.setTextInteractionFlags(Qt.NoTextInteraction); pl.addRow(bg_note)
+        bg_note.setWordWrap(True); bg_note.setTextInteractionFlags(Qt.NoTextInteraction); pl.addRow('',bg_note)
         self._update_repeat_controls()
         upper.addWidget(playbox,3); lay.addLayout(upper,3)
         logs=QHBoxLayout()
