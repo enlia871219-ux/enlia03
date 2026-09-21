@@ -1094,7 +1094,7 @@ class MainWindow(QMainWindow):
         """Capture a user-selected screen rectangle directly into the image library and chain."""
         self.log_event(f'[{now()}] 이미지 직접 지정 시작: 화면에서 영역을 드래그하세요.')
         self.selector = RegionSelector('region', self)
-        self.selector.selected.connect(self.direct_capture_done)
+        self.selector.selected.connect(lambda r: (self.selector.hide(), QTimer.singleShot(80, lambda r=r: self.direct_capture_done(r))))
         self.selector.cancelled.connect(lambda: self.log_event(f'[{now()}] 이미지 직접 지정 취소'))
         self.selector.show()
 
