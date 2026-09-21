@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-09-20-IMGDEBUG-07"
+BUILD_ID = "2026-09-21-IMGDEBUG-08"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -370,6 +370,8 @@ class Step:
     name: str = ""
     path: str = ""
     wait: float = 0.0
+    image_wait: float = 10.0
+    click_delay: float = 0.0
     accuracy: float = 0.80
     region: list[int] = field(default_factory=lambda: [0, 0, 0, 0])
     click_mode: str = "center"
@@ -495,12 +497,15 @@ class StepEditor(QDialog):
         info = QFormLayout()
         self.name = QLineEdit(step.name)
         self.wait = QDoubleSpinBox(); self.wait.setRange(0, 3600); self.wait.setDecimals(2); self.wait.setSingleStep(.1); self.wait.setValue(step.wait)
+        self.image_wait = QDoubleSpinBox(); self.image_wait.setRange(.1, 3600); self.image_wait.setDecimals(2); self.image_wait.setSingleStep(.1); self.image_wait.setValue(getattr(step, 'image_wait', 10.0))
+        self.click_delay = QDoubleSpinBox(); self.click_delay.setRange(0, 3600); self.click_delay.setDecimals(2); self.click_delay.setSingleStep(.1); self.click_delay.setValue(getattr(step, 'click_delay', 0.0))
         self.acc = QDoubleSpinBox(); self.acc.setRange(.01, 1.0); self.acc.setDecimals(2); self.acc.setSingleStep(.01); self.acc.setValue(step.accuracy)
         self.click = QComboBox(); self.click.addItems(["이미지 중앙", "직접 지정"]); self.click.setCurrentIndex(0 if step.click_mode=='center' else 1)
         self.cx = QSpinBox(); self.cx.setRange(-10000,10000); self.cx.setValue(step.click_x)
         self.cy = QSpinBox(); self.cy.setRange(-10000,10000); self.cy.setValue(step.click_y)
-        info.addRow("이름", self.name); info.addRow("대기시간(초)", self.wait); info.addRow("이미지 정확도", self.acc); info.addRow("클릭 위치", self.click)
+        info.addRow("이름", self.name); info.addRow("대기시간(초)", self.wait); info.addRow("이미지 대기(초)", self.image_wait); info.addRow("이미지 정확도", self.acc); info.addRow("클릭 위치", self.click)
         xy = QHBoxLayout(); xy.addWidget(self.cx); xy.addWidget(QLabel(",")); xy.addWidget(self.cy); xyw=QWidget(); xyw.setLayout(xy); info.addRow("상대 위치 X,Y", xyw)
+        info.addRow("이미지 인식 후 [초] 후 클릭 실행", self.click_delay)
         self.region_label = QLabel(self._region_text()); info.addRow("검색 영역", self.region_label)
         btn_region = QPushButton("화면에서 검색영역 지정")
         btn_click = QPushButton("화면에서 클릭 위치 지정")
@@ -552,9 +557,12 @@ class StepEditor(QDialog):
         retry = self.fail_action.currentIndex() == 0
         goto = self.fail_action.currentIndex() == 2
         self.retry_count.setEnabled(retry); self.retry_delay.setEnabled(retry); self.fail_target.setEnabled(goto)
+        self.retry_count.setToolTip("‘다시 시도하기’에서만 수정할 수 있습니다." if not retry else "")
+        self.retry_delay.setToolTip("‘다시 시도하기’에서만 수정할 수 있습니다." if not retry else "")
+        self.fail_target.setToolTip("‘특정 단계로 이동’에서만 수정할 수 있습니다." if not goto else "")
     def accept(self):
         self.step.name=self.name.text().strip() or Path(self.step.path).name
-        self.step.wait=self.wait.value(); self.step.accuracy=self.acc.value(); self.step.click_mode='center' if self.click.currentIndex()==0 else 'offset'; self.step.click_x=self.cx.value(); self.step.click_y=self.cy.value()
+        self.step.wait=self.wait.value(); self.step.image_wait=self.image_wait.value(); self.step.click_delay=self.click_delay.value(); self.step.accuracy=self.acc.value(); self.step.click_mode='center' if self.click.currentIndex()==0 else 'offset'; self.step.click_x=self.cx.value(); self.step.click_y=self.cy.value()
         self.step.failure_action = ['retry','ignore','goto'][self.fail_action.currentIndex()]
         self.step.retry_count = self.retry_count.value()
         self.step.retry_delay = self.retry_delay.value()
@@ -679,7 +687,7 @@ class MacroWorker(threading.Thread):
                         self.sig.run.emit(f"[{now()}] 단계 {i+1}/{len(self.steps)} 건너뜀: 사용 안 함")
                         i += 1; continue
                     if st.type == 'image':
-                        self.sig.run.emit(f"[{now()}] 단계 {i+1}/{len(self.steps)}: {st.name} | type=image | path={st.path} | 정확도={st.accuracy:.2f} | 대기={self.settings['image_wait']:.2f}s | 영역={st.region}")
+                        self.sig.run.emit(f"[{now()}] 단계 {i+1}/{len(self.steps)}: {st.name} | type=image | path={st.path} | 정확도={st.accuracy:.2f} | 이미지 대기={getattr(st,'image_wait',10.0):.2f}s | 클릭 지연={getattr(st,'click_delay',0.0):.2f}s | 영역={st.region}")
                     else:
                         self.sig.run.emit(f"[{now()}] 단계 {i+1}/{len(self.steps)}: {st.name} | type={st.type} | enabled={st.enabled}")
                     next_i = i + 1
@@ -702,7 +710,7 @@ class MacroWorker(threading.Thread):
                         found=None
                         attempts=0
                         while not self.stop_evt.is_set():
-                            deadline=time.monotonic()+max(0,self.settings['image_wait'])
+                            deadline=time.monotonic()+max(0,float(getattr(st,'image_wait',10.0)))
                             found=None
                             while time.monotonic()<=deadline and not self.stop_evt.is_set():
                                 while not self.pause_evt.is_set() and not self.stop_evt.is_set(): time.sleep(.05)
@@ -773,6 +781,11 @@ class MacroWorker(threading.Thread):
                             break
                         if found:
                             score,x,y,w,h=found
+                            click_delay=max(0.0,float(getattr(st,'click_delay',0.0)))
+                            if click_delay > 0:
+                                self.sig.run.emit(f"[{now()}] 이미지 인식 후 클릭 대기: {click_delay:.2f}초")
+                                self._wait(click_delay)
+                                if self.stop_evt.is_set(): break
                             cx=x+w//2; cy=y+h//2
                             if st.click_mode=='offset': cx=x+st.click_x; cy=y+st.click_y
                             if self.background:
@@ -896,6 +909,14 @@ class MainWindow(QMainWindow):
         /* Disabled state must be visibly grey, not merely unclickable.
            These selectors intentionally have the same ID specificity as the
            coloured action buttons so their disabled grey appearance wins. */
+        QLineEdit:disabled,
+        QSpinBox:disabled,
+        QDoubleSpinBox:disabled,
+        QComboBox:disabled{
+            background:#e2e2e2;
+            color:#777777;
+            border:1px solid #c8c8c8;
+        }
         QPushButton:disabled,
         QPushButton#blueAction:disabled,
         QPushButton#greenAction:disabled,
@@ -969,7 +990,7 @@ class MainWindow(QMainWindow):
         for c in range(1,6): self.table.horizontalHeader().setSectionResizeMode(c,QHeaderView.ResizeToContents)
         self.table.cellDoubleClicked.connect(self.edit_selected); self.table.itemSelectionChanged.connect(self._table_selection_changed); el.addWidget(self.table)
         btns=QHBoxLayout();
-        for text,slot in [('이미지 추가',self.add_image),('편집',self.edit_selected),('제거',self.remove_selected),('▲',self.move_up),('▼',self.move_down),('모두 삭제',self.clear_all)]:
+        for text,slot in [('이미지 추가',self.add_image),('이미지 직접 지정',self.add_image_direct),('편집',self.edit_selected),('제거',self.remove_selected),('▲',self.move_up),('▼',self.move_down),('모두 삭제',self.clear_all)]:
             b=QPushButton(text); b.clicked.connect(slot); btns.addWidget(b)
         el.addLayout(btns); upper.addWidget(editbox,6)
         playbox=QGroupBox('재생 설정'); pl=QFormLayout(playbox)
@@ -979,7 +1000,7 @@ class MainWindow(QMainWindow):
         self.minutes=QDoubleSpinBox(); self.minutes.setRange(.1,999999); self.minutes.setValue(10); self.minutes.setSuffix(' 분'); pl.addRow('시간',self.minutes)
         self.cycle_wait=QDoubleSpinBox(); self.cycle_wait.setRange(0,3600); self.cycle_wait.setDecimals(2); pl.addRow('전체 반복 대기(초)',self.cycle_wait)
         self.speed=QComboBox(); self.speed.addItems(['1.0x','1.2x','1.5x','2.0x','3.0x','5.0x']); pl.addRow('재생 속도',self.speed)
-        self.image_wait=QDoubleSpinBox(); self.image_wait.setRange(.1,3600); self.image_wait.setDecimals(2); self.image_wait.setValue(10); pl.addRow('이미지 대기(초)',self.image_wait)
+        self.image_wait=QDoubleSpinBox(); self.image_wait.setRange(.1,3600); self.image_wait.setDecimals(2); self.image_wait.setValue(10); pl.addRow('새 이미지 기본 대기(초)',self.image_wait)
         self.default_acc=QDoubleSpinBox(); self.default_acc.setRange(.01,1); self.default_acc.setDecimals(2); self.default_acc.setValue(.80); pl.addRow('기본 이미지 정확도',self.default_acc)
         self.background_mode=QCheckBox('비활성(백그라운드) 입력 모드'); pl.addRow('입력 방식',self.background_mode)
         targetrow=QHBoxLayout(); self.target_title=QLineEdit(); self.target_title.setPlaceholderText('창 이름(제목)'); targetrow.addWidget(self.target_title)
@@ -1066,9 +1087,47 @@ class MainWindow(QMainWindow):
             if Path(f).resolve()!=dest.resolve():
                 try: shutil.copy2(f,dest)
                 except Exception: dest=Path(f)
-            self.steps.append(Step(name=Path(dest).stem,path=str(dest),accuracy=self.default_acc.value()))
+            self.steps.append(Step(name=Path(dest).stem,path=str(dest),image_wait=self.image_wait.value(),accuracy=self.default_acc.value()))
             self.log_event(f'[{now()}] 이미지 추가: {Path(dest).name}')
         self.refresh_table()
+    def add_image_direct(self):
+        """Capture a user-selected screen rectangle directly into the image library and chain."""
+        self.log_event(f'[{now()}] 이미지 직접 지정 시작: 화면에서 영역을 드래그하세요.')
+        self.selector = RegionSelector('region', self)
+        self.selector.selected.connect(self.direct_capture_done)
+        self.selector.cancelled.connect(lambda: self.log_event(f'[{now()}] 이미지 직접 지정 취소'))
+        self.selector.show()
+
+    def direct_capture_done(self, region):
+        try:
+            x,y,w,h = map(int, region)
+            if w <= 3 or h <= 3:
+                self.log_event(f'[{now()}] 이미지 직접 지정 실패: 영역이 너무 작습니다.')
+                return
+            img = grab_screen([x,y,w,h])
+            if img is None or img.size == 0:
+                QMessageBox.warning(self, '이미지 직접 지정', '선택한 화면 영역을 캡처하지 못했습니다.')
+                self.log_event(f'[{now()}] 이미지 직접 지정 실패: 화면 캡처 결과가 없습니다.')
+                return
+            stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            dest = TEMPLATE_DIR / f'직접지정_{stamp}.png'
+            if not cv2.imwrite(str(dest), img):
+                raise RuntimeError('PNG 파일 저장에 실패했습니다.')
+            self.steps.append(Step(
+                name=dest.stem,
+                path=str(dest),
+                image_wait=self.image_wait.value(),
+                accuracy=self.default_acc.value()
+            ))
+            self.refresh_image_list()
+            self.refresh_table()
+            self.log_event(f'[{now()}] 이미지 직접 지정 완료: {dest.name} | 영역={x},{y} {w}x{h}')
+        except Exception as e:
+            QMessageBox.critical(self, '이미지 직접 지정 오류', f'화면 영역을 이미지로 저장하지 못했습니다.\n\n{type(e).__name__}: {e}')
+            self.log_event(f'[{now()}] 이미지 직접 지정 예외: {type(e).__name__}: {e}')
+        finally:
+            self.selector = None
+
     def import_image(self):
         files,_=QFileDialog.getOpenFileNames(self,'이미지 라이브러리로 가져오기',str(TEMPLATE_DIR),'Images (*.png *.jpg *.jpeg *.bmp *.webp *.svg)')
         for f in files:
@@ -1089,7 +1148,7 @@ class MainWindow(QMainWindow):
         row=self.image_list.currentRow()
         if row<0: return
         p=self.image_list.item(row).text()
-        self.steps.append(Step(name=Path(p).stem,path=p,accuracy=self.default_acc.value()))
+        self.steps.append(Step(name=Path(p).stem,path=p,image_wait=self.image_wait.value(),accuracy=self.default_acc.value()))
         self.refresh_table()
         self.log_event(f'[{now()}] 이미지 라이브러리 항목을 체인에 추가: {Path(p).name}')
 
