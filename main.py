@@ -763,6 +763,7 @@ class MacroWorker(threading.Thread):
                     elif st.type=='image':
                         found=None
                         attempts=0
+                        failure_attempts=0
                         while not self.stop_evt.is_set():
                             deadline=time.monotonic()+max(0,float(getattr(st,'image_wait',10.0)))
                             found=None
@@ -827,10 +828,10 @@ class MacroWorker(threading.Thread):
                                 self._wait(delay)
                                 continue
                             action=getattr(st,'failure_action','retry')
-                            if action == 'retry' and attempts < max(0, int(getattr(st,'retry_count',3))):
-                                attempts += 1
+                            if action == 'retry' and failure_attempts < max(0, int(getattr(st,'retry_count',3))):
+                                failure_attempts += 1
                                 delay=max(0,float(getattr(st,'retry_delay',1.0)))
-                                self.sig.run.emit(f"[{now()}] 인식 실패: {st.name} → 재시도 {attempts}/{st.retry_count} ({delay:.2f}초 후)")
+                                self.sig.run.emit(f"[{now()}] 인식 실패 후 동작 재시도: {st.name} → {failure_attempts}/{st.retry_count} ({delay:.2f}초 후)")
                                 self._wait(delay)
                                 continue
                             if action == 'ignore':
