@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-09-21-IMGDEBUG-08"
+BUILD_ID = "2026-09-21-IMGDEBUG-09"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -461,7 +461,7 @@ class RegionSelector(QWidget):
         super().__init__(parent)
         self.mode = mode; self.origin = None; self.rubber = None
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        self.setWindowOpacity(0.25); self.setCursor(Qt.CrossCursor)
+        self.setWindowOpacity(0.25); self.setCursor(Qt.CrossCursor); self.setFocusPolicy(Qt.StrongFocus)
         screen = QApplication.primaryScreen().geometry(); self.setGeometry(screen)
         self.setStyleSheet('background:#1c2430;')
     def mousePressEvent(self, e):
@@ -492,8 +492,18 @@ class StepEditor(QDialog):
         self.setWindowTitle("이미지 매크로 항목 편집"); self.resize(760, 650)
         root = QVBoxLayout(self)
         top = QHBoxLayout()
+        preview_box = QVBoxLayout()
         self.preview = QLabel("이미지 없음"); self.preview.setAlignment(Qt.AlignCenter); self.preview.setMinimumSize(420, 250); self.preview.setFrameShape(QFrame.StyledPanel)
-        top.addWidget(self.preview, 2)
+        preview_box.addWidget(self.preview, 1)
+        preview_box.addWidget(QLabel("이미지 수정"))
+        image_edit_row = QHBoxLayout()
+        self.replace_file_btn = QPushButton("이미지 파일 교체")
+        self.replace_direct_btn = QPushButton("이미지 직접 지정")
+        image_edit_row.addWidget(self.replace_file_btn); image_edit_row.addWidget(self.replace_direct_btn)
+        image_edit_widget = QWidget(); image_edit_widget.setLayout(image_edit_row)
+        preview_box.addWidget(image_edit_widget)
+        preview_widget = QWidget(); preview_widget.setLayout(preview_box)
+        top.addWidget(preview_widget, 2)
         info = QFormLayout()
         self.name = QLineEdit(step.name)
         self.wait = QDoubleSpinBox(); self.wait.setRange(0, 3600); self.wait.setDecimals(2); self.wait.setSingleStep(.1); self.wait.setValue(step.wait)
@@ -534,7 +544,39 @@ class StepEditor(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel); root.addWidget(buttons)
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
         btn_region.clicked.connect(self.pick_region); btn_click.clicked.connect(self.pick_click)
+        self.replace_file_btn.clicked.connect(self.replace_image_file)
+        self.replace_direct_btn.clicked.connect(self.replace_image_direct)
         self._update_preview(); self.click.currentIndexChanged.connect(self._click_changed); self._click_changed()
+    def replace_image_file(self):
+        f, _ = QFileDialog.getOpenFileName(self, "이미지 파일 교체", str(TEMPLATE_DIR), "Images (*.png *.jpg *.jpeg *.bmp *.webp *.svg)")
+        if not f: return
+        try:
+            src=Path(f); dest=TEMPLATE_DIR/src.name
+            if src.resolve()!=dest.resolve(): shutil.copy2(src,dest)
+            self.step.path=str(dest); self.path.setText(self.step.path); self._update_preview()
+        except Exception as e:
+            QMessageBox.critical(self, "이미지 파일 교체", f"이미지를 교체하지 못했습니다.\n\n{type(e).__name__}: {e}")
+
+    def replace_image_direct(self):
+        self.selector=RegionSelector('region',self)
+        self.selector.selected.connect(lambda r:(self.selector.hide(),QTimer.singleShot(80,lambda r=r:self.replace_image_direct_done(r))))
+        self.selector.cancelled.connect(lambda: setattr(self,'selector',None))
+        self.selector.show(); self.selector.setFocus(Qt.OtherFocusReason)
+
+    def replace_image_direct_done(self,region):
+        try:
+            x,y,w,h=map(int,region)
+            if w<=3 or h<=3: QMessageBox.warning(self,"이미지 직접 지정","선택한 영역이 너무 작습니다."); return
+            img=grab_screen([x,y,w,h])
+            if img is None or img.size==0: QMessageBox.warning(self,"이미지 직접 지정","선택한 화면 영역을 캡처하지 못했습니다."); return
+            dest=TEMPLATE_DIR/f"직접교체_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
+            if not cv2.imwrite(str(dest),img): raise RuntimeError("PNG 파일 저장에 실패했습니다.")
+            self.step.path=str(dest); self.path.setText(self.step.path); self._update_preview()
+        except Exception as e:
+            QMessageBox.critical(self,"이미지 직접 지정",f"이미지를 교체하지 못했습니다.\n\n{type(e).__name__}: {e}")
+        finally:
+            self.selector=None
+
     def _region_text(self):
         r=self.step.region; return "전체 화면" if not r[2] else f"X={r[0]}, Y={r[1]}, W={r[2]}, H={r[3]}"
     def _update_preview(self):
@@ -986,16 +1028,21 @@ class MainWindow(QMainWindow):
             b=QPushButton(text); b.clicked.connect(slot); fl.addWidget(b)
         fl.addStretch(); upper.addWidget(filebox,0)
         editbox=QGroupBox('매크로 체인 편집기 (재생 목록)'); el=QVBoxLayout(editbox)
-        self.table=QTableWidget(0,6); self.table.setHorizontalHeaderLabels(['매크로','실행 후 대기(초)','정확도','검색 영역','클릭 위치','사용']); self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers); self.table.setAlternatingRowColors(True); self.table.horizontalHeader().setSectionResizeMode(0,QHeaderView.Stretch)
-        for c in range(1,6): self.table.horizontalHeader().setSectionResizeMode(c,QHeaderView.ResizeToContents)
+        self.table=QTableWidget(0,6); self.table.setHorizontalHeaderLabels(['매크로','실행 후 대기(초)','정확도','검색 영역','클릭 위치','사용']); self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers); self.table.setAlternatingRowColors(True); header=self.table.horizontalHeader()
+        for c in range(6): header.setSectionResizeMode(c,QHeaderView.Interactive); header.setMinimumSectionSize(70)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        header.setStretchLastSection(False)
         self.table.cellDoubleClicked.connect(self.edit_selected); self.table.itemSelectionChanged.connect(self._table_selection_changed); el.addWidget(self.table)
         btns=QHBoxLayout();
         for text,slot in [('이미지 추가',self.add_image),('이미지 직접 지정',self.add_image_direct),('편집',self.edit_selected),('제거',self.remove_selected),('▲',self.move_up),('▼',self.move_down),('모두 삭제',self.clear_all)]:
             b=QPushButton(text); b.clicked.connect(slot); btns.addWidget(b)
-        el.addLayout(btns); upper.addWidget(editbox,6)
+        el.addLayout(btns); upper.addWidget(editbox,7)
         playbox=QGroupBox('재생 설정'); pl=QFormLayout(playbox)
         self.r_inf=QRadioButton('무한 반복'); self.r_count=QRadioButton('횟수'); self.r_time=QRadioButton('시간(분)'); self.r_inf.setChecked(True)
-        rr=QHBoxLayout(); rr.addWidget(self.r_inf); rr.addWidget(self.r_count); rr.addWidget(self.r_time); rw=QWidget(); rw.setLayout(rr); pl.addRow('반복 방식',rw)
+        rr=QHBoxLayout(); rr.addWidget(self.r_inf); rr.addWidget(self.r_count); rr.addWidget(self.r_time); rr.addStretch(); rw=QWidget(); rw.setLayout(rr); pl.addRow('반복 방식',rw)
+        self.r_inf.toggled.connect(self._update_repeat_controls)
+        self.r_count.toggled.connect(self._update_repeat_controls)
+        self.r_time.toggled.connect(self._update_repeat_controls)
         self.repeat=QSpinBox(); self.repeat.setRange(1,999999); self.repeat.setValue(1); pl.addRow('횟수',self.repeat)
         self.minutes=QDoubleSpinBox(); self.minutes.setRange(.1,999999); self.minutes.setValue(10); self.minutes.setSuffix(' 분'); pl.addRow('시간',self.minutes)
         self.cycle_wait=QDoubleSpinBox(); self.cycle_wait.setRange(0,3600); self.cycle_wait.setDecimals(2); pl.addRow('전체 반복 대기(초)',self.cycle_wait)
@@ -1008,8 +1055,10 @@ class MainWindow(QMainWindow):
         tw=QWidget(); tw.setLayout(targetrow); pl.addRow('창 이름',tw)
         self.target_process=QLineEdit(); self.target_process.setPlaceholderText('프로세스 이름 예: Game.exe'); pl.addRow('프로세스 이름',self.target_process)
         self.target_status=QLabel('대상 창: 아직 선택되지 않음'); self.target_status.setStyleSheet('color:#666;font-weight:700;'); pl.addRow('선택 상태',self.target_status)
-        pl.addRow(QLabel('※ 비활성 모드는 실제 마우스를 움직이지 않고 Windows 백그라운드 메시지를 대상 창으로 보냅니다. 대상 프로그램이 이를 지원하지 않을 수 있습니다.'))
-        upper.addWidget(playbox,4); lay.addLayout(upper,3)
+        bg_note=QLabel('※ 비활성 모드는 실제 마우스를 움직이지 않고 Windows 백그라운드 메시지를 대상 창으로 보냅니다. 대상 프로그램이 이를 지원하지 않을 수 있습니다.')
+        bg_note.setWordWrap(True); bg_note.setTextInteractionFlags(Qt.NoTextInteraction); pl.addRow(bg_note)
+        self._update_repeat_controls()
+        upper.addWidget(playbox,3); lay.addLayout(upper,3)
         logs=QHBoxLayout()
         event_box=self.log_box('이벤트 로그','event_log')
         run_box=self.log_box('실행 로그','run_log')
@@ -1095,8 +1144,15 @@ class MainWindow(QMainWindow):
         self.log_event(f'[{now()}] 이미지 직접 지정 시작: 화면에서 영역을 드래그하세요.')
         self.selector = RegionSelector('region', self)
         self.selector.selected.connect(lambda r: (self.selector.hide(), QTimer.singleShot(80, lambda r=r: self.direct_capture_done(r))))
-        self.selector.cancelled.connect(lambda: self.log_event(f'[{now()}] 이미지 직접 지정 취소'))
-        self.selector.show()
+        self.selector.cancelled.connect(self.direct_capture_cancelled)
+        self.selector.show(); self.selector.setFocus(Qt.OtherFocusReason)
+
+    def direct_capture_cancelled(self):
+        if getattr(self,'selector',None):
+            try: self.selector.close()
+            except Exception: pass
+        self.selector=None
+        self.log_event(f'[{now()}] 이미지 직접 지정 취소')
 
     def direct_capture_done(self, region):
         try:
@@ -1444,6 +1500,11 @@ class MainWindow(QMainWindow):
         else:
             self._set_target_status(False, '대상 창을 찾지 못했습니다.')
             QMessageBox.warning(self,'대상 창','대상 창을 찾지 못했습니다.\n\n대상 프로그램을 먼저 활성화한 뒤 이 버튼을 눌러주세요.')
+
+    def _update_repeat_controls(self):
+        if not hasattr(self,'repeat') or not hasattr(self,'minutes'): return
+        self.repeat.setEnabled(self.r_count.isChecked())
+        self.minutes.setEnabled(self.r_time.isChecked())
 
     def settings(self):
         mode='count' if self.r_count.isChecked() else 'time' if self.r_time.isChecked() else 'infinite'; return {'mode':mode,'repeat':self.repeat.value(),'minutes':self.minutes.value(),'cycle_wait':self.cycle_wait.value(),'speed':float(self.speed.currentText().replace('x','')),'image_wait':self.image_wait.value(),'background':self.background_mode.isChecked(),'target_title':self.target_title.text().strip(),'target_process':self.target_process.text().strip(),'target_hwnd':getattr(self,'_last_target_hwnd',None)}
