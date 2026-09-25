@@ -1,8 +1,18 @@
 # -*- coding: utf-8 -*-
 """ShadeLawcro V1.0 entry point with the macro-group extension."""
 import lawcro_core as core
+from PySide6.QtCore import QObject, Signal
 import group_extension
 
+class GroupSignals(QObject):
+    event = Signal(str)
+    run = Signal(str)
+    status = Signal(int)
+    finished = Signal()
+    recorded = Signal(object)
+    step = Signal(int)
+
+core.Signals = GroupSignals
 group_extension.core = core
 group_extension.install(core)
 
