@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Persistent UI tweaks for ShadeLawcro."""
 from PySide6.QtCore import QSettings, QTimer
+from PySide6.QtWidgets import QHeaderView
 
-BUILD_ID = "2026-09-26-GROUP-03"
+BUILD_ID = "2026-09-26-GROUP-04"
 
 
 def install(core):
@@ -50,10 +51,12 @@ def install(core):
     def _apply_group_ui(self):
         table = getattr(self, 'group_chain_table', None)
         if table is not None:
-            # The order number is already shown by the row itself/progress highlight;
-            # do not duplicate it in a separate No column.
+            # The No column is intentionally hidden. The row order remains the
+            # actual playback order internally, so there is no duplicate number.
             table.setColumnHidden(0, True)
-            table.horizontalHeader().setSectionResizeMode(0, table.horizontalHeader().Fixed)
+            # Do not use table.horizontalHeader().Fixed here: Fixed is a
+            # QHeaderView.ResizeMode enum, not an instance attribute.
+            table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
 
         # Match the macro-chain action-button palette.
         for name, object_name in (
