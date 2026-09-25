@@ -3,6 +3,10 @@
 import lawcro_core as core
 from PySide6.QtCore import QObject, Signal
 import group_extension
+import ui_patches
+
+# Keep the build label shown by the core event log in sync with the current build.
+core.BUILD_ID = ui_patches.BUILD_ID
 
 class GroupSignals(QObject):
     event = Signal(str)
@@ -15,15 +19,11 @@ class GroupSignals(QObject):
 core.Signals = GroupSignals
 group_extension.core = core
 group_extension.install(core)
+ui_patches.install(core)
 
 
 def install_group_shift_hotkeys(window):
-    """Reliable Shift+F3/F4/F5 listener for the macro-group controls.
-
-    pynput reports the physical left/right Shift keys as Key.shift_l/Key.shift_r,
-    not always as the generic Key.shift.  The original group hotkey handler
-    checked only Key.shift, so Shift+F3/F4/F5 could be missed.
-    """
+    """Reliable Shift+F3/F4/F5 listener for the macro-group controls."""
     pressed = set()
 
     def on_press(key):
