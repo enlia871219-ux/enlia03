@@ -17,11 +17,14 @@ class GroupSignals(QObject):
 
 core.Signals = GroupSignals
 group_extension.core = core
-group_extension.install(core)
-# GroupWorker is defined at module scope in group_extension.py, while Step is
-# owned by lawcro_core. Make the shared Step type available to the worker so
-# group playback can deserialize the exact same .pchain steps as normal playback.
+# group_extension.GroupWorker is defined at module scope. Its playback path
+# must use the exact same core classes/functions as the normal chain player.
+# Export them explicitly so the worker never falls back to stale/local names.
 group_extension.Step = core.Step
+group_extension.Signals = core.Signals
+group_extension.MacroWorker = core.MacroWorker
+group_extension.now = core.now
+group_extension.install(core)
 ui_patches.install(core)
 
 
