@@ -3,7 +3,9 @@
 from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtWidgets import QHeaderView
 
-BUILD_ID = "2026-09-26-GROUP-04"
+# Single source of truth for the build shown by the application event log.
+# main.py assigns this value to lawcro_core.BUILD_ID at startup.
+BUILD_ID = "2026-09-26-GROUP-06"
 
 
 def install(core):
@@ -33,49 +35,31 @@ def install(core):
                 pass
 
         header = table.horizontalHeader()
-        if getattr(self, '_chain_header_persistence_installed', False):
-            return
-        self._chain_header_persistence_installed = True
-
-        def save_widths(section, old_size, new_size):
+        def save_widths(*_):
             try:
-                widths = [header.sectionSize(i) for i in range(table.columnCount())]
-                settings.setValue('chain_editor/header_widths', ','.join(map(str, widths)))
-                settings.sync()
+                QSettings('ShadeLawcro', 'ShadeLawcroV1').setValue(
+                    'chain_editor/header_widths',
+                    ','.join(str(header.sectionSize(i)) for i in range(table.columnCount()))
+                )
             except Exception:
                 pass
-
+        try:
+            header.sectionResized.disconnect()
+        except Exception:
+            pass
         header.sectionResized.connect(save_widths)
-        QTimer.singleShot(0, _restore_chain_header)
 
     def _apply_group_ui(self):
         table = getattr(self, 'group_chain_table', None)
-        if table is not None:
-            # The No column is intentionally hidden. The row order remains the
-            # actual playback order internally, so there is no duplicate number.
+        if table is not None and table.columnCount() >= 3:
             table.setColumnHidden(0, True)
-            # Do not use table.horizontalHeader().Fixed here: Fixed is a
-            # QHeaderView.ResizeMode enum, not an instance attribute.
             table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
-
-        # Match the macro-chain action-button palette.
-        for name, object_name in (
-            ('g_start_btn', 'blueAction'),
-            ('g_pause_btn', 'greenAction'),
-            ('g_stop_btn', 'redAction'),
-        ):
-            button = getattr(self, name, None)
-            if button is not None:
-                button.setObjectName(object_name)
-                self.style().unpolish(button)
-                self.style().polish(button)
-                button.update()
-
-        _restore_chain_header(self)
+            table.setColumnWidth(0, 0)
 
     def init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
+        _restore_chain_header(self)
         _apply_group_ui(self)
+        QTimer.singleShot(0, lambda: (_restore_chain_header(self), _apply_group_ui(self)))
 
     MainWindow.__init__ = init
-    return MainWindow
