@@ -5,7 +5,6 @@ from PySide6.QtCore import QObject, Signal
 import group_extension
 import ui_patches
 
-# Keep the build label shown by the core event log in sync with the current build.
 core.BUILD_ID = ui_patches.BUILD_ID
 
 class GroupSignals(QObject):
@@ -22,21 +21,28 @@ group_extension.install(core)
 ui_patches.install(core)
 
 
-def install_group_shift_hotkeys(window):
-    """Reliable Shift+F3/F4/F5 listener for the macro-group controls."""
+def install_group_hotkeys(window):
+    """Handle original F1-F5 and group Shift+F3/F4/F5 shortcuts."""
     pressed = set()
 
     def on_press(key):
         try:
             pressed.add(key)
             shift_down = core.keyboard.Key.shift_l in pressed or core.keyboard.Key.shift_r in pressed
-            if not shift_down:
-                return
-            action = {
-                core.keyboard.Key.f3: 'group_start',
-                core.keyboard.Key.f4: 'group_stop',
-                core.keyboard.Key.f5: 'group_pause',
-            }.get(key)
+            if shift_down:
+                action = {
+                    core.keyboard.Key.f3: 'group_start',
+                    core.keyboard.Key.f4: 'group_stop',
+                    core.keyboard.Key.f5: 'group_pause',
+                }.get(key)
+            else:
+                action = {
+                    core.keyboard.Key.f1: 'start_record',
+                    core.keyboard.Key.f2: 'stop_record',
+                    core.keyboard.Key.f3: 'start_play',
+                    core.keyboard.Key.f4: 'stop_play',
+                    core.keyboard.Key.f5: 'toggle_pause',
+                }.get(key)
             if action:
                 window.hotkey_action.emit(action)
         except Exception:
@@ -51,13 +57,13 @@ def install_group_shift_hotkeys(window):
     listener = core.keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.daemon = True
     listener.start()
-    window._group_shift_hotkey_listener = listener
+    window._group_hotkey_listener = listener
 
 
 if __name__ == '__main__':
     app = core.QApplication(core.sys.argv)
     app.setApplicationName(core.APP_NAME)
     window = core.MainWindow()
-    install_group_shift_hotkeys(window)
+    install_group_hotkeys(window)
     window.show()
     core.sys.exit(app.exec())
