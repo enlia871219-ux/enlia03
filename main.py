@@ -70,6 +70,7 @@ def install_group_hotkeys(window):
 if __name__ == '__main__':
     app = core.QApplication(core.sys.argv)
     app.setApplicationName(core.APP_NAME)
+    app.setWindowIcon(core.QIcon(str(core.ASSET_DIR / "gamgo1.ico")))
     window = core.MainWindow()
     install_group_hotkeys(window)
     window.show()
