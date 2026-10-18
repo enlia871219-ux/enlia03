@@ -522,7 +522,7 @@ class StepEditor(QDialog):
         self.image_wait = QDoubleSpinBox(); self.image_wait.setRange(.1, 3600); self.image_wait.setDecimals(2); self.image_wait.setSingleStep(.1); self.image_wait.setValue(getattr(step, 'image_wait', 10.0))
         self.click_delay = QDoubleSpinBox(); self.click_delay.setRange(0, 3600); self.click_delay.setDecimals(2); self.click_delay.setSingleStep(.1); self.click_delay.setValue(getattr(step, 'click_delay', 0.0))
         self.acc = QDoubleSpinBox(); self.acc.setRange(.01, 1.0); self.acc.setDecimals(2); self.acc.setSingleStep(.01); self.acc.setValue(step.accuracy)
-        self.click = QComboBox(); self.click.addItems(["이미지 중앙", "직접 지정", "키 입력"])
+        self.click = QComboBox(); self.click.addItems(["이미지 중앙", "직접 지정", "키 입력 : 비활성화모드 사용 불가"])
         self.click.setCurrentIndex({"center": 0, "offset": 1, "key": 2}.get(step.click_mode, 0))
         self.cx = QSpinBox(); self.cx.setRange(-10000,10000); self.cx.setValue(step.click_x)
         self.cy = QSpinBox(); self.cy.setRange(-10000,10000); self.cy.setValue(step.click_y)
@@ -533,7 +533,13 @@ class StepEditor(QDialog):
         info.addRow("이름", self.name); info.addRow("대기시간(초)", self.wait); info.addRow("이미지 대기(초)", self.image_wait); info.addRow("이미지 정확도", self.acc); info.addRow("클릭 위치", self.click)
         xy = QHBoxLayout(); xy.addWidget(self.cx); xy.addWidget(QLabel(",")); xy.addWidget(self.cy); xyw=QWidget(); xyw.setLayout(xy); info.addRow("상대 위치 X,Y", xyw)
         key_row = QHBoxLayout(); key_row.addWidget(self.key_button); key_row.addStretch(1); key_widget = QWidget(); key_widget.setLayout(key_row)
-        info.addRow("입력 키 설정", key_widget)
+        key_label = QWidget()
+        key_label_layout = QVBoxLayout(key_label); key_label_layout.setContentsMargins(0, 0, 0, 0); key_label_layout.setSpacing(2)
+        key_label_title = QLabel("입력 키 설정")
+        key_label_warning = QLabel("※ 비활성화 모드 사용 불가")
+        key_label_warning.setStyleSheet("color: red; font-weight: bold;")
+        key_label_layout.addWidget(key_label_title); key_label_layout.addWidget(key_label_warning)
+        info.addRow(key_label, key_widget)
         info.addRow("인식 후 클릭 실행 대기(초)", self.click_delay)
         self.region_label = QLabel(self._region_text()); info.addRow("검색 영역", self.region_label)
         btn_region = QPushButton("화면에서 검색영역 지정")
@@ -899,48 +905,64 @@ class MacroWorker(threading.Thread):
                                 self._wait(click_delay)
                                 if self.stop_evt.is_set(): break
                             cx=x+w//2; cy=y+h//2
-                            if st.click_mode=='key':
-                                click_succeeded = True
-                                self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 키 입력 모드")
-                            elif st.click_mode=='offset':
-                                if getattr(st, "click_absolute", False):
-                                    if self.background:
-                                        if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
-                                        ox,oy=window_client_origin(self.target_hwnd)
-                                        cx=int(st.click_x)-ox; cy=int(st.click_y)-oy
-                                    else:
-                                        cx=int(st.click_x); cy=int(st.click_y)
-                                else:
-                                    cx=x+st.click_x; cy=y+st.click_y
-                            if st.click_mode != 'key':
-                                click_succeeded = False
-                                if self.background:
-                                    if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
-                                    click_succeeded=background_click(self.target_hwnd, cx, cy)
-                                    if click_succeeded:
-                                        self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 클릭 메시지 전송 ({cx},{cy})")
-                                    else:
-                                        self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 클릭 메시지 전송 실패 ({cx},{cy})")
-                                else:
-                                    self.mouse.position=(cx,cy); self.mouse.click(mouse.Button.left)
-                                    click_succeeded = True
-                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 클릭 ({cx},{cy})")
-                            if click_succeeded and str(getattr(st, "input_key", "") or "").strip():
-                                key_name = str(st.input_key).strip()
-                                if self.background:
-                                    key_sent = background_key(self.target_hwnd, key_name)
-                                else:
+                            if st.click_mode == 'key':
+                                key_name = str(getattr(st, "input_key", "") or "").strip()
+                                target_is_foreground = False
+                                if self.target_hwnd and os.name == "nt":
+                                    user32 = ctypes.windll.user32
+                                    fg = int(user32.GetForegroundWindow() or 0)
+                                    target_is_foreground = bool(fg and (fg == int(self.target_hwnd) or user32.IsChild(int(self.target_hwnd), fg)))
+                                if self.background and not target_is_foreground:
+                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 키 입력 생략 (비활성화 모드에서는 키 입력 불가)")
+                                elif key_name:
                                     try:
                                         key_obj = getattr(keyboard.Key, key_name.lower(), None)
                                         if key_obj is None:
                                             key_obj = key_name.lower() if len(key_name) == 1 else None
                                         if key_obj is not None:
-                                            self.keyb.press(key_obj); self.keyb.release(key_obj); key_sent = True
+                                            self.keyb.press(key_obj); self.keyb.release(key_obj)
+                                            self.sig.run.emit(f"[{now()}] 입력 키 {key_name}: 전송 완료")
                                         else:
-                                            key_sent = False
-                                    except Exception:
-                                        key_sent = False
-                                self.sig.run.emit(f"[{now()}] 입력 키 {key_name}: " + ("전송 완료" if key_sent else "전송 실패"))
+                                            self.sig.run.emit(f"[{now()}] 입력 키 {key_name}: 지원하지 않는 키")
+                                    except Exception as e:
+                                        self.sig.run.emit(f"[{now()}] 입력 키 {key_name}: 전송 실패 ({type(e).__name__})")
+                                else:
+                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 키 입력 모드 (입력 키 미설정)")
+                            else:
+                                if st.click_mode == 'offset':
+                                    if getattr(st, "click_absolute", False):
+                                        if self.background:
+                                            if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
+                                            ox,oy=window_client_origin(self.target_hwnd)
+                                            cx=int(st.click_x)-ox; cy=int(st.click_y)-oy
+                                        else:
+                                            cx=int(st.click_x); cy=int(st.click_y)
+                                    else:
+                                        cx=x+st.click_x; cy=y+st.click_y
+
+                                if self.background:
+                                    if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
+                                    target_is_foreground = False
+                                    if self.target_hwnd and os.name == "nt":
+                                        user32 = ctypes.windll.user32
+                                        fg = int(user32.GetForegroundWindow() or 0)
+                                        target_is_foreground = bool(fg and (fg == int(self.target_hwnd) or user32.IsChild(int(self.target_hwnd), fg)))
+                                    if target_is_foreground:
+                                        # Active target: preserve the original physical cursor move + click behavior.
+                                        ox, oy = window_client_origin(self.target_hwnd)
+                                        sx, sy = ox + int(cx), oy + int(cy)
+                                        self.mouse.position = (sx, sy)
+                                        self.mouse.click(mouse.Button.left)
+                                        self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 활성 대상 창 클릭 ({sx},{sy})")
+                                    else:
+                                        click_succeeded = background_click(self.target_hwnd, cx, cy)
+                                        if click_succeeded:
+                                            self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 비활성 창 클릭 메시지 전송 ({cx},{cy})")
+                                        else:
+                                            self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 비활성 창 클릭 메시지 전송 실패 ({cx},{cy})")
+                                else:
+                                    self.mouse.position=(cx,cy); self.mouse.click(mouse.Button.left)
+                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 클릭 ({cx},{cy})")
                     self._wait(st.wait)
                     i = next_i
                 count+=1
