@@ -445,29 +445,34 @@ def background_scroll(hwnd, x, y, dy, log=None):
                 user32.SetCursorPos(old_pos[0], old_pos[1])
 
     # Inactive windows cannot receive physical input without activating them.
-    # Try the background message path only for an inactive target.
+    # v09 experiment: synthetic activation/focus hints around the wheel message.
+    # This does not call SetForegroundWindow and does not intentionally change
+    # the real foreground HWND. The game may ignore these hints or react to them.
+    WM_ACTIVATE, WM_SETFOCUS, WM_KILLFOCUS = 0x0006, 0x0007, 0x0008
+    WA_INACTIVE, WA_ACTIVE = 0, 1
     try:
-        posted = bool(user32.PostMessageW(target, 0x020A, wparam, lparam))
-        diag(
-            f"백그라운드 휠 PostMessage: HWND={target}, "
-            f"방향={'위' if delta > 0 else '아래'}, delta={delta}, "
-            f"화면좌표=({screen_x},{screen_y}), 성공={posted}"
-        )
-        if posted:
-            return True
-    except Exception as e:
-        diag(f"백그라운드 휠 PostMessage 예외 HWND={target}: {type(e).__name__}")
-
-    try:
+        user32.SendMessageW(hwnd, WM_ACTIVATE, WA_ACTIVE, 0)
+        user32.SendMessageW(target, WM_SETFOCUS, 0, 0)
+        diag(f"백그라운드 휠 실험: WM_ACTIVATE/WM_SETFOCUS 전송 top={hwnd}, target={target}; 실제 foreground 변경 없음")
+        time.sleep(0.03)
         result = user32.SendMessageW(target, 0x020A, wparam, lparam)
+        time.sleep(0.03)
+        user32.SendMessageW(target, WM_KILLFOCUS, 0, 0)
+        user32.SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0)
         diag(
-            f"백그라운드 휠 SendMessage fallback: HWND={target}, delta={delta}, "
+            f"백그라운드 휠 실험: 포커스 힌트+SendMessage HWND={target}, delta={delta}, "
             f"반환={result} (게임 처리 여부 미확인)"
         )
         return True
     except Exception as e:
-        diag(f"백그라운드 휠 SendMessage 예외 HWND={target}: {type(e).__name__}")
+        try:
+            user32.SendMessageW(target, WM_KILLFOCUS, 0, 0)
+            user32.SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0)
+        except Exception:
+            pass
+        diag(f"백그라운드 휠 실험 예외 HWND={target}: {type(e).__name__}: {e}")
         return False
+
 
 
 def grab_window(hwnd):
