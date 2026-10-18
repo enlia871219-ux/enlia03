@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-19-v08"
+BUILD_ID = "2026-10-19-v09"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -288,19 +288,39 @@ def background_click(hwnd, x, y, log=None):
         diag(f"백그라운드 진단: PostMessage HWND={int(target)} 좌표=({tx},{ty}) move={moved} down={down} up={up} hold=100ms settle=80ms")
         return moved and down and up
 
-    def send_sequence(target, tx, ty):
+    WM_ACTIVATE, WM_SETFOCUS, WM_KILLFOCUS = 0x0006, 0x0007, 0x0008
+    WA_INACTIVE, WA_ACTIVE = 0, 1
+
+    def send_sequence(target, tx, ty, focus_hint=False):
         if not target or not user32.IsWindow(target):
             return False
         lp = pack_xy(tx, ty)
         try:
+            if focus_hint:
+                # Experimental focus hints only; never change the real foreground HWND.
+                user32.SendMessageW(hwnd, WM_ACTIVATE, WA_ACTIVE, 0)
+                user32.SendMessageW(target, WM_SETFOCUS, 0, 0)
+                diag(f"백그라운드 실험: WM_ACTIVATE/WM_SETFOCUS 전송 top={hwnd}, target={target}; 실제 foreground 변경 없음")
+                time.sleep(0.03)
             user32.SendMessageW(target, WM_MOUSEMOVE, 0, lp)
             user32.SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp)
             time.sleep(0.10)
             user32.SendMessageW(target, WM_LBUTTONUP, 0, lp)
             time.sleep(0.03)
-            diag(f"백그라운드 진단: SendMessage HWND={int(target)} 좌표=({tx},{ty}) 호출 완료 hold=100ms (게임 처리 여부는 별도)")
+            if focus_hint:
+                user32.SendMessageW(target, WM_KILLFOCUS, 0, 0)
+                user32.SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0)
+                diag(f"백그라운드 실험: WM_KILLFOCUS/WM_ACTIVATE(WA_INACTIVE) 종료 top={hwnd}, target={target}")
+            diag(f"백그라운드 진단: SendMessage HWND={int(target)} 좌표=({tx},{ty}) 호출 완료 hold=100ms focus_hint={focus_hint} (게임 처리 여부는 별도)")
             return True
-        except Exception:
+        except Exception as e:
+            if focus_hint:
+                try:
+                    user32.SendMessageW(target, WM_KILLFOCUS, 0, 0)
+                    user32.SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0)
+                except Exception:
+                    pass
+            diag(f"백그라운드 진단: SendMessage 예외 HWND={int(target)} {type(e).__name__}: {e}")
             return False
 
     # Resolve the render/input child before sending anything: SendMessage to the
@@ -338,9 +358,9 @@ def background_click(hwnd, x, y, log=None):
         user32.SetCursorPos(int(screen_pt.x), int(screen_pt.y))
         if not target_active:
             for target, tx, ty in targets:
-                if send_sequence(target, tx, ty):
+                if send_sequence(target, tx, ty, focus_hint=True):
                     diag(
-                        f"백그라운드 진단: 비활성 창 동기 입력 전달 완료 HWND={target}; "
+                        f"백그라운드 실험: 비활성 창에 포커스 힌트+클릭 메시지 전달 완료 HWND={target}; "
                         "실제 게임 처리 여부는 로그만으로 확정할 수 없음"
                     )
                     return True
