@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-19-WHEEL-DPI-01"
+BUILD_ID = "2026-10-19-WHEEL-DPI-02"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -279,9 +279,13 @@ def background_click(hwnd, x, y, log=None):
         lp = pack_xy(tx, ty)
         moved = bool(user32.PostMessageW(target, WM_MOUSEMOVE, 0, lp))
         down = bool(user32.PostMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp))
-        time.sleep(0.025)
+        # Some games sample the real cursor position while processing queued
+        # input. Hold the button longer and leave the cursor at the target until
+        # the queued down/up messages have had time to be processed.
+        time.sleep(0.10)
         up = bool(user32.PostMessageW(target, WM_LBUTTONUP, 0, lp))
-        diag(f"백그라운드 진단: PostMessage HWND={int(target)} 좌표=({tx},{ty}) move={moved} down={down} up={up}")
+        time.sleep(0.08)
+        diag(f"백그라운드 진단: PostMessage HWND={int(target)} 좌표=({tx},{ty}) move={moved} down={down} up={up} hold=100ms settle=80ms")
         return moved and down and up
 
     def send_sequence(target, tx, ty):
@@ -291,9 +295,10 @@ def background_click(hwnd, x, y, log=None):
         try:
             user32.SendMessageW(target, WM_MOUSEMOVE, 0, lp)
             user32.SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp)
-            time.sleep(0.025)
+            time.sleep(0.10)
             user32.SendMessageW(target, WM_LBUTTONUP, 0, lp)
-            diag(f"백그라운드 진단: SendMessage HWND={int(target)} 좌표=({tx},{ty}) 호출 완료(게임 처리 여부는 별도)")
+            time.sleep(0.03)
+            diag(f"백그라운드 진단: SendMessage HWND={int(target)} 좌표=({tx},{ty}) 호출 완료 hold=100ms (게임 처리 여부는 별도)")
             return True
         except Exception:
             return False
