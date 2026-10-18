@@ -377,6 +377,8 @@ class Step:
     click_mode: str = "center"
     click_x: int = 0
     click_y: int = 0
+    click_absolute: bool = False  # selected desktop screen position
+    input_key: str = ""
     enabled: bool = True
     failure_action: str = "retry"  # retry / ignore / goto
     retry_count: int = 3
@@ -515,8 +517,13 @@ class StepEditor(QDialog):
         self.click = QComboBox(); self.click.addItems(["이미지 중앙", "직접 지정"]); self.click.setCurrentIndex(0 if step.click_mode=='center' else 1)
         self.cx = QSpinBox(); self.cx.setRange(-10000,10000); self.cx.setValue(step.click_x)
         self.cy = QSpinBox(); self.cy.setRange(-10000,10000); self.cy.setValue(step.click_y)
+        self.input_key = str(getattr(step, "input_key", "") or "")
+        self.key_button = QPushButton(f"현재 입력 키 : {self.input_key}" if self.input_key else "클릭 후 원하는 키 입력")
+        self.key_button.clicked.connect(self.capture_input_key)
         info.addRow("이름", self.name); info.addRow("대기시간(초)", self.wait); info.addRow("이미지 대기(초)", self.image_wait); info.addRow("이미지 정확도", self.acc); info.addRow("클릭 위치", self.click)
         xy = QHBoxLayout(); xy.addWidget(self.cx); xy.addWidget(QLabel(",")); xy.addWidget(self.cy); xyw=QWidget(); xyw.setLayout(xy); info.addRow("상대 위치 X,Y", xyw)
+        key_row = QHBoxLayout(); key_row.addWidget(self.key_button); key_row.addStretch(1); key_widget = QWidget(); key_widget.setLayout(key_row)
+        info.addRow("입력 키 설정", key_widget)
         info.addRow("인식 후 클릭 실행 대기(초)", self.click_delay)
         self.region_label = QLabel(self._region_text()); info.addRow("검색 영역", self.region_label)
         btn_region = QPushButton("화면에서 검색영역 지정")
@@ -593,6 +600,31 @@ class StepEditor(QDialog):
         pm=image_to_qpixmap(self.step.path, QSize(420,250)) if self.step.path else QPixmap()
         self.preview.setPixmap(pm if not pm.isNull() else QPixmap());
         if pm.isNull(): self.preview.setText("미리볼 이미지가 없습니다")
+    def capture_input_key(self):
+        self.key_button.setText("키 입력 대기 중... (취소: Esc)")
+        self.key_button.setFocus()
+        self.grabKeyboard()
+        self._capturing_input_key = True
+
+    def keyPressEvent(self, event):
+        if getattr(self, "_capturing_input_key", False):
+            from PySide6.QtGui import QKeySequence
+            if event.key() == Qt.Key_Escape:
+                self._capturing_input_key = False
+                self.releaseKeyboard()
+                self.key_button.setText(f"현재 입력 키 : {self.input_key}" if self.input_key else "클릭 후 원하는 키 입력")
+                return
+            if event.key() in (Qt.Key_Shift, Qt.Key_Control, Qt.Key_Alt, Qt.Key_Meta):
+                return
+            key_name = QKeySequence(event.key()).toString()
+            if key_name:
+                self.input_key = key_name
+                self.key_button.setText(f"현재 입력 키 : {key_name}")
+            self._capturing_input_key = False
+            self.releaseKeyboard()
+            return
+        super().keyPressEvent(event)
+
     def _click_changed(self):
         en=self.click.currentIndex()==1; self.cx.setEnabled(en); self.cy.setEnabled(en)
     def pick_region(self):
@@ -601,9 +633,10 @@ class StepEditor(QDialog):
     def pick_click(self):
         self.selector=RegionSelector('click', self); self.selector.selected.connect(self.click_done); self.selector.show()
     def click_done(self, p):
-        r=self.step.region
-        if r[2]: self.cx.setValue(p[0]-r[0]); self.cy.setValue(p[1]-r[1])
-        else: self.cx.setValue(p[0]); self.cy.setValue(p[1])
+        # The picker returns desktop screen coordinates. Convert to target-client
+        # coordinates immediately before dispatching the click.
+        self.cx.setValue(int(p[0])); self.cy.setValue(int(p[1]))
+        self.step.click_absolute = True
         self.click.setCurrentIndex(1)
     def _failure_changed(self):
         retry = self.fail_action.currentIndex() == 0
@@ -614,7 +647,8 @@ class StepEditor(QDialog):
         self.fail_target.setToolTip("‘특정 단계로 이동’에서만 수정할 수 있습니다." if not goto else "")
     def accept(self):
         self.step.name=self.name.text().strip() or Path(self.step.path).name
-        self.step.wait=self.wait.value(); self.step.image_wait=self.image_wait.value(); self.step.click_delay=self.click_delay.value(); self.step.accuracy=self.acc.value(); self.step.click_mode='center' if self.click.currentIndex()==0 else 'offset'; self.step.click_x=self.cx.value(); self.step.click_y=self.cy.value()
+        self.step.wait=self.wait.value(); self.step.image_wait=self.image_wait.value(); self.step.click_delay=self.click_delay.value(); self.step.accuracy=self.acc.value(); self.step.click_mode='center' if self.click.currentIndex()==0 else 'offset'; self.step.click_x=self.cx.value(); self.step.click_y=self.cy.value(); self.step.input_key=self.input_key
+        if self.click.currentIndex()==0: self.step.click_absolute=False
         self.step.failure_action = ['retry','ignore','goto'][self.fail_action.currentIndex()]
         self.step.retry_count = self.retry_count.value()
         self.step.retry_delay = self.retry_delay.value()
@@ -676,6 +710,7 @@ class MacroWorker(threading.Thread):
         self.stop_evt=threading.Event(); self.pause_evt=threading.Event(); self.pause_evt.set(); self.advance_evt=threading.Event(); self.idx=0
         self.step_lock=threading.Lock(); self.step_request=None
         self.mouse=mouse.Controller()
+        self.keyb=keyboard.Controller()
         self.background=bool(self.settings.get("background", False))
         self.target_title=str(self.settings.get("target_title", ""))
         self.target_process=str(self.settings.get("target_process", ""))
@@ -852,17 +887,44 @@ class MacroWorker(threading.Thread):
                                 self._wait(click_delay)
                                 if self.stop_evt.is_set(): break
                             cx=x+w//2; cy=y+h//2
-                            if st.click_mode=='offset': cx=x+st.click_x; cy=y+st.click_y
+                            if st.click_mode=='offset':
+                                if getattr(st, "click_absolute", False):
+                                    if self.background:
+                                        if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
+                                        ox,oy=window_client_origin(self.target_hwnd)
+                                        cx=int(st.click_x)-ox; cy=int(st.click_y)-oy
+                                    else:
+                                        cx=int(st.click_x); cy=int(st.click_y)
+                                else:
+                                    cx=x+st.click_x; cy=y+st.click_y
+                            click_succeeded = False
                             if self.background:
                                 if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
-                                clicked=background_click(self.target_hwnd, cx, cy)
-                                if clicked:
+                                click_succeeded=background_click(self.target_hwnd, cx, cy)
+                                if click_succeeded:
                                     self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 입력 전송 ({cx},{cy})")
                                 else:
                                     self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 입력 전송 실패 ({cx},{cy})")
                             else:
                                 self.mouse.position=(cx,cy); self.mouse.click(mouse.Button.left)
+                                click_succeeded = True
                                 self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 클릭 ({cx},{cy})")
+                            if click_succeeded and str(getattr(st, "input_key", "") or "").strip():
+                                key_name = str(st.input_key).strip()
+                                if self.background:
+                                    key_sent = background_key(self.target_hwnd, key_name)
+                                else:
+                                    try:
+                                        key_obj = getattr(keyboard.Key, key_name.lower(), None)
+                                        if key_obj is None:
+                                            key_obj = key_name.lower() if len(key_name) == 1 else None
+                                        if key_obj is not None:
+                                            self.keyb.press(key_obj); self.keyb.release(key_obj); key_sent = True
+                                        else:
+                                            key_sent = False
+                                    except Exception:
+                                        key_sent = False
+                                self.sig.run.emit(f"[{now()}] 입력 키 {key_name}: " + ("전송 완료" if key_sent else "전송 실패"))
                     self._wait(st.wait)
                     i = next_i
                 count+=1
