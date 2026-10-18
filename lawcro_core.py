@@ -213,6 +213,29 @@ def background_click(hwnd, x, y, log=None):
         diag(f"백그라운드 진단: 음수 클라이언트 좌표 ({x},{y})")
         return False
 
+    # Validate coordinates against the actual client rectangle. Template matching
+    # can occasionally return a center exactly on the exclusive right/bottom edge.
+    # Correct only a one-pixel boundary overflow; reject larger out-of-range values.
+    client_rect = ctypes.wintypes.RECT()
+    if not user32.GetClientRect(hwnd, ctypes.byref(client_rect)):
+        diag(f"백그라운드 진단: GetClientRect 실패 HWND={hwnd}")
+        return False
+    client_w = int(client_rect.right - client_rect.left)
+    client_h = int(client_rect.bottom - client_rect.top)
+    if client_w <= 0 or client_h <= 0:
+        diag(f"백그라운드 진단: 비정상 클라이언트 크기 HWND={hwnd} size=({client_w},{client_h})")
+        return False
+    original_x, original_y = x, y
+    if x >= client_w or y >= client_h:
+        if x == client_w or y == client_h:
+            x = min(x, client_w - 1)
+            y = min(y, client_h - 1)
+            diag(f"백그라운드 진단: 경계 좌표 보정 ({original_x},{original_y}) → ({x},{y}), client_size=({client_w},{client_h})")
+        else:
+            diag(f"백그라운드 진단: 클라이언트 영역 밖 좌표 거부 pos=({x},{y}), client_size=({client_w},{client_h})")
+            return False
+    diag(f"백그라운드 진단: 좌표 검증 완료 pos=({x},{y}), client_size=({client_w},{client_h})")
+
     def _window_class_name(api, target):
         try:
             buf = ctypes.create_unicode_buffer(256)
@@ -260,7 +283,7 @@ def background_click(hwnd, x, y, log=None):
         return False
     child = user32.ChildWindowFromPointEx(hwnd, ctypes.wintypes.POINT(x, y), 0)
     targets = []
-    diag(f"백그라운드 진단: top HWND={hwnd} class={_window_class_name(user32, hwnd)} client=({x},{y}) screen=({screen_pt.x},{screen_pt.y}) child={int(child) if child else 0}")
+    diag(f"백그라운드 진단: top HWND={hwnd} class={_window_class_name(user32, hwnd)} client_pos=({x},{y}) client_size=({client_w},{client_h}) screen=({screen_pt.x},{screen_pt.y}) child={int(child) if child else 0}")
     if child and int(child) != hwnd:
         child = int(child)
         child_pt = ctypes.wintypes.POINT(screen_pt.x, screen_pt.y)
