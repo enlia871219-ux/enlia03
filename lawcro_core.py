@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-19-v05"
+BUILD_ID = "2026-10-19-v06"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -400,8 +400,32 @@ def background_scroll(hwnd, x, y, dy, log=None):
         f"client=({client_x},{client_y}), delta={delta}"
     )
 
-    # Do not send both PostMessage and SendMessage unconditionally: if the
-    # game handles both, one recorded wheel notch can be applied twice.
+    # If the game is the foreground window, prefer a real OS wheel input.
+    # Background WM_MOUSEWHEEL messages can report successful delivery while
+    # Unity's input layer ignores them.
+    foreground = int(user32.GetForegroundWindow() or 0)
+    target_active = foreground == hwnd or bool(user32.IsChild(hwnd, foreground))
+    if target_active:
+        cursor = ctypes.wintypes.POINT()
+        got_cursor = bool(user32.GetCursorPos(ctypes.byref(cursor)))
+        old_pos = (int(cursor.x), int(cursor.y)) if got_cursor else None
+        try:
+            user32.SetCursorPos(screen_x, screen_y)
+            time.sleep(0.03)
+            user32.mouse_event(0x0800, 0, 0, delta, 0)  # MOUSEEVENTF_WHEEL
+            diag(
+                f"백그라운드 휠 실제 입력: targetHWND={hwnd}, foregroundHWND={foreground}, "
+                f"방향={'위' if delta > 0 else '아래'}, delta={delta}, screen=({screen_x},{screen_y})"
+            )
+            return True
+        except Exception as e:
+            diag(f"백그라운드 휠 실제 입력 예외: {type(e).__name__}: {e}")
+        finally:
+            if old_pos is not None:
+                user32.SetCursorPos(old_pos[0], old_pos[1])
+
+    # Inactive windows cannot receive physical input without activating them.
+    # Try the background message path only for an inactive target.
     try:
         posted = bool(user32.PostMessageW(target, 0x020A, wparam, lparam))
         diag(
@@ -1031,9 +1055,16 @@ class MacroWorker(threading.Thread):
                                         log=lambda message: self.sig.run.emit(f"[{now()}] {message}")
                                     )
                                 else:
+                                    # Give the target application a moment to observe the
+                                    # cursor location before injecting a real Win32 wheel event.
                                     self.mouse.position=(x,y)
-                                    self.mouse.scroll(0, dy)
-                                    ok=True
+                                    time.sleep(0.03)
+                                    try:
+                                        ctypes.windll.user32.mouse_event(0x0800, 0, 0, int(dy) * 120, 0)
+                                        ok=True
+                                    except Exception as wheel_error:
+                                        ok=False
+                                        self.sig.run.emit(f"[{now()}] 실제 휠 입력 예외: {type(wheel_error).__name__}: {wheel_error}")
                                 self.sig.run.emit(f"[{now()}] 휠 {'위' if dy > 0 else '아래'} 실행: ({x},{y}), delta={dy}, 전송={'성공' if ok else '실패'}")
                             else:
                                 if self.background:
