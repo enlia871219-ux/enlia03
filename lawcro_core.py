@@ -193,79 +193,48 @@ def window_client_origin(hwnd):
 
 
 def background_click(hwnd, x, y):
-    """Dispatch a Unity click while keeping the target window inactive.
+    """Post a complete mouse-click sequence to the target client area.
 
-    Mabinogi Mobile appears to consult the real Windows cursor position while
-    handling mouse messages. Therefore, temporarily move the real cursor to
-    the requested client point, synchronously send the mouse messages, then
-    restore the cursor. This never activates the target window.
+    Unlike moving the physical cursor, posting client mouse messages allows
+    the target to receive the click while another window is in front.
     """
     if os.name != 'nt' or not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
         return False
-    user32=ctypes.windll.user32
-    hwnd=int(hwnd)
-    x=int(x); y=int(y)
+    user32 = ctypes.windll.user32
+    hwnd = int(hwnd)
+    x, y = int(x), int(y)
     if x < 0 or y < 0:
         return False
 
-    WM_MOUSEMOVE=0x0200
-    WM_LBUTTONDOWN=0x0201
-    WM_LBUTTONUP=0x0202
-    MK_LBUTTON=0x0001
+    WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP = 0x0200, 0x0201, 0x0202
+    MK_LBUTTON = 0x0001
 
-    def pack_xy(px,py):
+    def pack_xy(px, py):
         return ((int(py) & 0xFFFF) << 16) | (int(px) & 0xFFFF)
 
-    def client_to_screen(target, px, py):
-        pt=ctypes.wintypes.POINT(int(px),int(py))
-        if not user32.ClientToScreen(int(target),ctypes.byref(pt)):
-            return None
-        return int(pt.x), int(pt.y)
-
-    def send_sequence(target, tx, ty):
-        lp=pack_xy(tx,ty)
-        try:
-            user32.SendMessageW(target,WM_MOUSEMOVE,0,lp)
-            user32.SendMessageW(target,WM_LBUTTONDOWN,MK_LBUTTON,lp)
-            user32.SendMessageW(target,WM_LBUTTONUP,0,lp)
-            return True
-        except Exception:
+    def post_click(target, tx, ty):
+        if not target or not user32.IsWindow(target):
             return False
+        lp = pack_xy(tx, ty)
+        # PostMessage queues the messages on the target's thread without
+        # requiring that the target be the foreground window.
+        a = user32.PostMessageW(target, WM_MOUSEMOVE, 0, lp)
+        b = user32.PostMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp)
+        time.sleep(0.025)
+        c = user32.PostMessageW(target, WM_LBUTTONUP, 0, lp)
+        return bool(a and b and c)
 
-    cursor=ctypes.wintypes.POINT()
-    if not user32.GetCursorPos(ctypes.byref(cursor)):
+    # Try the actual child render window first, then the configured HWND.
+    screen_pt = ctypes.wintypes.POINT(x, y)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(screen_pt)):
         return False
-    old_x,old_y=int(cursor.x),int(cursor.y)
-
-    # First try the selected Unity player HWND.
-    screen=client_to_screen(hwnd,x,y)
-    if screen is not None:
-        try:
-            if user32.SetCursorPos(screen[0],screen[1]):
-                if send_sequence(hwnd,x,y):
-                    time.sleep(0.03)
-                    return True
-        finally:
-            user32.SetCursorPos(old_x,old_y)
-
-    # Fallback for a separate child render/input window.
-    child=user32.ChildWindowFromPointEx(
-        hwnd,ctypes.wintypes.POINT(x,y),0
-    )
-    if child and int(child)!=hwnd:
-        child=int(child)
-        screen=client_to_screen(hwnd,x,y)
-        if screen is not None:
-            child_pt=ctypes.wintypes.POINT(screen[0],screen[1])
-            if user32.ScreenToClient(child,ctypes.byref(child_pt)):
-                try:
-                    if user32.SetCursorPos(screen[0],screen[1]):
-                        if send_sequence(child,int(child_pt.x),int(child_pt.y)):
-                            time.sleep(0.03)
-                            return True
-                finally:
-                    user32.SetCursorPos(old_x,old_y)
-    return False
+    child = user32.ChildWindowFromPointEx(hwnd, ctypes.wintypes.POINT(x, y), 0)
+    if child and int(child) != hwnd:
+        child_pt = ctypes.wintypes.POINT(screen_pt.x, screen_pt.y)
+        if user32.ScreenToClient(child, ctypes.byref(child_pt)):
+            if post_click(int(child), int(child_pt.x), int(child_pt.y)):
+                return True
+    return post_click(hwnd, x, y)
 
 def grab_window(hwnd):
     """Capture the client area with PrintWindow, then fall back to MSS for GPU-rendered windows."""
@@ -553,7 +522,8 @@ class StepEditor(QDialog):
         self.image_wait = QDoubleSpinBox(); self.image_wait.setRange(.1, 3600); self.image_wait.setDecimals(2); self.image_wait.setSingleStep(.1); self.image_wait.setValue(getattr(step, 'image_wait', 10.0))
         self.click_delay = QDoubleSpinBox(); self.click_delay.setRange(0, 3600); self.click_delay.setDecimals(2); self.click_delay.setSingleStep(.1); self.click_delay.setValue(getattr(step, 'click_delay', 0.0))
         self.acc = QDoubleSpinBox(); self.acc.setRange(.01, 1.0); self.acc.setDecimals(2); self.acc.setSingleStep(.01); self.acc.setValue(step.accuracy)
-        self.click = QComboBox(); self.click.addItems(["이미지 중앙", "직접 지정"]); self.click.setCurrentIndex(0 if step.click_mode=='center' else 1)
+        self.click = QComboBox(); self.click.addItems(["이미지 중앙", "직접 지정", "키 입력"])
+        self.click.setCurrentIndex({"center": 0, "offset": 1, "key": 2}.get(step.click_mode, 0))
         self.cx = QSpinBox(); self.cx.setRange(-10000,10000); self.cx.setValue(step.click_x)
         self.cy = QSpinBox(); self.cy.setRange(-10000,10000); self.cy.setValue(step.click_y)
         self.input_key = str(getattr(step, "input_key", "") or "")
@@ -666,7 +636,9 @@ class StepEditor(QDialog):
         super().keyPressEvent(event)
 
     def _click_changed(self):
-        en=self.click.currentIndex()==1; self.cx.setEnabled(en); self.cy.setEnabled(en)
+        mode = self.click.currentIndex()
+        self.cx.setEnabled(mode == 1); self.cy.setEnabled(mode == 1)
+        self.key_button.setEnabled(mode == 2)
     def pick_region(self):
         self.selector=RegionSelector('region', self); self.selector.selected.connect(self.region_done); self.selector.show()
     def region_done(self, r): self.step.region=list(map(int,r)); self.region_label.setText(self._region_text())
@@ -687,8 +659,8 @@ class StepEditor(QDialog):
         self.fail_target.setToolTip("‘특정 단계로 이동’에서만 수정할 수 있습니다." if not goto else "")
     def accept(self):
         self.step.name=self.name.text().strip() or Path(self.step.path).name
-        self.step.wait=self.wait.value(); self.step.image_wait=self.image_wait.value(); self.step.click_delay=self.click_delay.value(); self.step.accuracy=self.acc.value(); self.step.click_mode='center' if self.click.currentIndex()==0 else 'offset'; self.step.click_x=self.cx.value(); self.step.click_y=self.cy.value(); self.step.input_key=self.input_key; self.step.click_absolute=self.click_absolute
-        if self.click.currentIndex()==0: self.step.click_absolute=False
+        self.step.wait=self.wait.value(); self.step.image_wait=self.image_wait.value(); self.step.click_delay=self.click_delay.value(); self.step.accuracy=self.acc.value(); self.step.click_mode=['center','offset','key'][self.click.currentIndex()]; self.step.click_x=self.cx.value(); self.step.click_y=self.cy.value(); self.step.input_key=self.input_key; self.step.click_absolute=self.click_absolute
+        if self.click.currentIndex()!=1: self.step.click_absolute=False
         self.step.failure_action = ['retry','ignore','goto'][self.fail_action.currentIndex()]
         self.step.retry_count = self.retry_count.value()
         self.step.retry_delay = self.retry_delay.value()
@@ -927,7 +899,10 @@ class MacroWorker(threading.Thread):
                                 self._wait(click_delay)
                                 if self.stop_evt.is_set(): break
                             cx=x+w//2; cy=y+h//2
-                            if st.click_mode=='offset':
+                            if st.click_mode=='key':
+                                click_succeeded = True
+                                self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 키 입력 모드")
+                            elif st.click_mode=='offset':
                                 if getattr(st, "click_absolute", False):
                                     if self.background:
                                         if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
@@ -937,18 +912,19 @@ class MacroWorker(threading.Thread):
                                         cx=int(st.click_x); cy=int(st.click_y)
                                 else:
                                     cx=x+st.click_x; cy=y+st.click_y
-                            click_succeeded = False
-                            if self.background:
-                                if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
-                                click_succeeded=background_click(self.target_hwnd, cx, cy)
-                                if click_succeeded:
-                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 입력 전송 ({cx},{cy})")
+                            if st.click_mode != 'key':
+                                click_succeeded = False
+                                if self.background:
+                                    if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
+                                    click_succeeded=background_click(self.target_hwnd, cx, cy)
+                                    if click_succeeded:
+                                        self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 클릭 메시지 전송 ({cx},{cy})")
+                                    else:
+                                        self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 클릭 메시지 전송 실패 ({cx},{cy})")
                                 else:
-                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 입력 전송 실패 ({cx},{cy})")
-                            else:
-                                self.mouse.position=(cx,cy); self.mouse.click(mouse.Button.left)
-                                click_succeeded = True
-                                self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 클릭 ({cx},{cy})")
+                                    self.mouse.position=(cx,cy); self.mouse.click(mouse.Button.left)
+                                    click_succeeded = True
+                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 클릭 ({cx},{cy})")
                             if click_succeeded and str(getattr(st, "input_key", "") or "").strip():
                                 key_name = str(st.input_key).strip()
                                 if self.background:
