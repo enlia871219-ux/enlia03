@@ -193,79 +193,76 @@ def window_client_origin(hwnd):
 
 
 def background_click(hwnd, x, y):
-    """Dispatch a Unity click while keeping the target window inactive.
-
-    Mabinogi Mobile appears to consult the real Windows cursor position while
-    handling mouse messages. Therefore, temporarily move the real cursor to
-    the requested client point, synchronously send the mouse messages, then
-    restore the cursor. This never activates the target window.
-    """
-    if os.name != 'nt' or not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
+    """Deliver a click to the Unity render child first, without activating the target."""
+    if os.name != 'nt' or not hwnd:
         return False
-    user32=ctypes.windll.user32
-    hwnd=int(hwnd)
-    x=int(x); y=int(y)
+    user32 = ctypes.windll.user32
+    hwnd = int(hwnd)
+    if not user32.IsWindow(hwnd):
+        return False
+    x, y = int(x), int(y)
     if x < 0 or y < 0:
         return False
 
-    WM_MOUSEMOVE=0x0200
-    WM_LBUTTONDOWN=0x0201
-    WM_LBUTTONUP=0x0202
-    MK_LBUTTON=0x0001
+    WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP = 0x0200, 0x0201, 0x0202
+    MK_LBUTTON = 0x0001
 
-    def pack_xy(px,py):
+    def pack_xy(px, py):
         return ((int(py) & 0xFFFF) << 16) | (int(px) & 0xFFFF)
 
-    def client_to_screen(target, px, py):
-        pt=ctypes.wintypes.POINT(int(px),int(py))
-        if not user32.ClientToScreen(int(target),ctypes.byref(pt)):
-            return None
-        return int(pt.x), int(pt.y)
+    def post_sequence(target, tx, ty):
+        if not target or not user32.IsWindow(target):
+            return False
+        lp = pack_xy(tx, ty)
+        moved = bool(user32.PostMessageW(target, WM_MOUSEMOVE, 0, lp))
+        down = bool(user32.PostMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp))
+        time.sleep(0.025)
+        up = bool(user32.PostMessageW(target, WM_LBUTTONUP, 0, lp))
+        return moved and down and up
 
     def send_sequence(target, tx, ty):
-        lp=pack_xy(tx,ty)
+        if not target or not user32.IsWindow(target):
+            return False
+        lp = pack_xy(tx, ty)
         try:
-            user32.SendMessageW(target,WM_MOUSEMOVE,0,lp)
-            user32.SendMessageW(target,WM_LBUTTONDOWN,MK_LBUTTON,lp)
-            user32.SendMessageW(target,WM_LBUTTONUP,0,lp)
+            user32.SendMessageW(target, WM_MOUSEMOVE, 0, lp)
+            user32.SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp)
+            time.sleep(0.025)
+            user32.SendMessageW(target, WM_LBUTTONUP, 0, lp)
             return True
         except Exception:
             return False
 
-    cursor=ctypes.wintypes.POINT()
-    if not user32.GetCursorPos(ctypes.byref(cursor)):
+    # Resolve the render/input child before sending anything: SendMessage to the
+    # top-level HWND can succeed technically while Unity ignores the click.
+    screen_pt = ctypes.wintypes.POINT(x, y)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(screen_pt)):
         return False
-    old_x,old_y=int(cursor.x),int(cursor.y)
+    child = user32.ChildWindowFromPointEx(hwnd, ctypes.wintypes.POINT(x, y), 0)
+    targets = []
+    if child and int(child) != hwnd:
+        child = int(child)
+        child_pt = ctypes.wintypes.POINT(screen_pt.x, screen_pt.y)
+        if user32.ScreenToClient(child, ctypes.byref(child_pt)):
+            targets.append((child, int(child_pt.x), int(child_pt.y)))
+    targets.append((hwnd, x, y))
 
-    # First try the selected Unity player HWND.
-    screen=client_to_screen(hwnd,x,y)
-    if screen is not None:
-        try:
-            if user32.SetCursorPos(screen[0],screen[1]):
-                if send_sequence(hwnd,x,y):
-                    time.sleep(0.03)
-                    return True
-        finally:
-            user32.SetCursorPos(old_x,old_y)
-
-    # Fallback for a separate child render/input window.
-    child=user32.ChildWindowFromPointEx(
-        hwnd,ctypes.wintypes.POINT(x,y),0
-    )
-    if child and int(child)!=hwnd:
-        child=int(child)
-        screen=client_to_screen(hwnd,x,y)
-        if screen is not None:
-            child_pt=ctypes.wintypes.POINT(screen[0],screen[1])
-            if user32.ScreenToClient(child,ctypes.byref(child_pt)):
-                try:
-                    if user32.SetCursorPos(screen[0],screen[1]):
-                        if send_sequence(child,int(child_pt.x),int(child_pt.y)):
-                            time.sleep(0.03)
-                            return True
-                finally:
-                    user32.SetCursorPos(old_x,old_y)
-    return False
+    # Queue the click to the render child first, then try synchronous delivery.
+    # Keep the cursor at the requested screen point while the messages are sent.
+    cursor = ctypes.wintypes.POINT()
+    got_cursor = bool(user32.GetCursorPos(ctypes.byref(cursor)))
+    old_pos = (int(cursor.x), int(cursor.y)) if got_cursor else None
+    try:
+        user32.SetCursorPos(int(screen_pt.x), int(screen_pt.y))
+        for target, tx, ty in targets:
+            if post_sequence(target, tx, ty):
+                return True
+            if send_sequence(target, tx, ty):
+                return True
+        return False
+    finally:
+        if old_pos is not None:
+            user32.SetCursorPos(old_pos[0], old_pos[1])
 
 def grab_window(hwnd):
     """Capture the client area with PrintWindow, then fall back to MSS for GPU-rendered windows."""
