@@ -201,7 +201,6 @@ def background_click(hwnd, x, y, log=None):
             except Exception:
                 pass
 
-    """Deliver a click to the Unity render child first, without activating the target."""
     if os.name != 'nt' or not hwnd:
         return False
     user32 = ctypes.windll.user32
