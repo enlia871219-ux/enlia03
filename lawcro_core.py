@@ -193,77 +193,79 @@ def window_client_origin(hwnd):
 
 
 def background_click(hwnd, x, y):
-    """Perform a real click at target client coordinates, temporarily activating the target.
+    """Dispatch a Unity click while keeping the target window inactive.
 
-    Unity/Mabinogi Mobile ignores synthetic WM_LBUTTON messages while inactive.
-    For that case, briefly foreground the target window, move the real cursor to
-    the requested point, send a real Windows mouse click, then restore the prior
-    cursor position and foreground window. This is a best-effort fallback; the
-    target may be briefly activated.
+    Mabinogi Mobile appears to consult the real Windows cursor position while
+    handling mouse messages. Therefore, temporarily move the real cursor to
+    the requested client point, synchronously send the mouse messages, then
+    restore the cursor. This never activates the target window.
     """
-    if os.name != 'nt' or not hwnd:
+    if os.name != 'nt' or not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
         return False
-    user32 = ctypes.windll.user32
-    hwnd = int(hwnd)
-    if not user32.IsWindow(hwnd) or user32.IsIconic(hwnd):
-        return False
-
-    x, y = int(x), int(y)
+    user32=ctypes.windll.user32
+    hwnd=int(hwnd)
+    x=int(x); y=int(y)
     if x < 0 or y < 0:
         return False
 
-    # Convert target client coordinates before changing focus.
-    target_pt = ctypes.wintypes.POINT(x, y)
-    if not user32.ClientToScreen(hwnd, ctypes.byref(target_pt)):
-        return False
-    target_x, target_y = int(target_pt.x), int(target_pt.y)
+    WM_MOUSEMOVE=0x0200
+    WM_LBUTTONDOWN=0x0201
+    WM_LBUTTONUP=0x0202
+    MK_LBUTTON=0x0001
 
-    cursor = ctypes.wintypes.POINT()
+    def pack_xy(px,py):
+        return ((int(py) & 0xFFFF) << 16) | (int(px) & 0xFFFF)
+
+    def client_to_screen(target, px, py):
+        pt=ctypes.wintypes.POINT(int(px),int(py))
+        if not user32.ClientToScreen(int(target),ctypes.byref(pt)):
+            return None
+        return int(pt.x), int(pt.y)
+
+    def send_sequence(target, tx, ty):
+        lp=pack_xy(tx,ty)
+        try:
+            user32.SendMessageW(target,WM_MOUSEMOVE,0,lp)
+            user32.SendMessageW(target,WM_LBUTTONDOWN,MK_LBUTTON,lp)
+            user32.SendMessageW(target,WM_LBUTTONUP,0,lp)
+            return True
+        except Exception:
+            return False
+
+    cursor=ctypes.wintypes.POINT()
     if not user32.GetCursorPos(ctypes.byref(cursor)):
         return False
-    old_x, old_y = int(cursor.x), int(cursor.y)
-    old_foreground = int(user32.GetForegroundWindow() or 0)
+    old_x,old_y=int(cursor.x),int(cursor.y)
 
-    try:
-        # Unity's input path requires a real foreground mouse event. Temporarily
-        # request activation and verify that Windows actually gave it focus.
-        user32.SetForegroundWindow(hwnd)
-        user32.BringWindowToTop(hwnd)
-        time.sleep(0.08)
-        foreground = int(user32.GetForegroundWindow() or 0)
-        if foreground != hwnd and not user32.IsChild(hwnd, foreground):
-            # One more activation attempt, then fail rather than click another app.
-            user32.SetActiveWindow(hwnd)
-            user32.SetForegroundWindow(hwnd)
-            time.sleep(0.08)
-            foreground = int(user32.GetForegroundWindow() or 0)
-        if foreground != hwnd and not user32.IsChild(hwnd, foreground):
-            return False
-
-        if not user32.SetCursorPos(target_x, target_y):
-            return False
-
-        # mouse_event generates actual system mouse input; unlike SendMessage,
-        # it is visible to Unity's input layer when the game is foreground.
-        user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
-        time.sleep(0.025)
-        user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
-        time.sleep(0.025)
-        return True
-    except Exception:
-        return False
-    finally:
-        # Restore cursor and previous foreground app even if clicking fails.
+    # First try the selected Unity player HWND.
+    screen=client_to_screen(hwnd,x,y)
+    if screen is not None:
         try:
-            user32.SetCursorPos(old_x, old_y)
-        except Exception:
-            pass
-        try:
-            if old_foreground and user32.IsWindow(old_foreground):
-                user32.SetForegroundWindow(old_foreground)
-        except Exception:
-            pass
+            if user32.SetCursorPos(screen[0],screen[1]):
+                if send_sequence(hwnd,x,y):
+                    time.sleep(0.03)
+                    return True
+        finally:
+            user32.SetCursorPos(old_x,old_y)
 
+    # Fallback for a separate child render/input window.
+    child=user32.ChildWindowFromPointEx(
+        hwnd,ctypes.wintypes.POINT(x,y),0
+    )
+    if child and int(child)!=hwnd:
+        child=int(child)
+        screen=client_to_screen(hwnd,x,y)
+        if screen is not None:
+            child_pt=ctypes.wintypes.POINT(screen[0],screen[1])
+            if user32.ScreenToClient(child,ctypes.byref(child_pt)):
+                try:
+                    if user32.SetCursorPos(screen[0],screen[1]):
+                        if send_sequence(child,int(child_pt.x),int(child_pt.y)):
+                            time.sleep(0.03)
+                            return True
+                finally:
+                    user32.SetCursorPos(old_x,old_y)
+    return False
 
 def grab_window(hwnd):
     """Capture the client area with PrintWindow, then fall back to MSS for GPU-rendered windows."""
