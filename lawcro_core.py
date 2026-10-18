@@ -327,12 +327,12 @@ def grab_window(hwnd):
     try:
         ok=False
         if bmp:
-            # The bitmap dimensions above are the CLIENT dimensions. Capture the
-            # client area only; PW_RENDERFULLCONTENT/PW flags that include the
-            # non-client frame can shift all template-match coordinates in
-            # windowed mode by the title-bar/border offset.
-            PW_CLIENTONLY = 0x00000001
-            ok=bool(user32.PrintWindow(hwnd,memdc,PW_CLIENTONLY))
+            # Keep the previously working capture flags for Unity/GPU windows.
+            # PW_CLIENTONLY can return a non-matching/blank client image on some
+            # Unity render paths, breaking recognition in both foreground and background.
+            ok=bool(user32.PrintWindow(hwnd,memdc,2))
+            if not ok:
+                ok=bool(user32.PrintWindow(hwnd,memdc,0))
         if ok:
             class BITMAPINFOHEADER(ctypes.Structure):
                 _fields_=[('biSize',ctypes.wintypes.DWORD),('biWidth',ctypes.wintypes.LONG),('biHeight',ctypes.wintypes.LONG),('biPlanes',ctypes.wintypes.WORD),('biBitCount',ctypes.wintypes.WORD),('biCompression',ctypes.wintypes.DWORD),('biSizeImage',ctypes.wintypes.DWORD),('biXPelsPerMeter',ctypes.wintypes.LONG),('biYPelsPerMeter',ctypes.wintypes.LONG),('biClrUsed',ctypes.wintypes.DWORD),('biClrImportant',ctypes.wintypes.DWORD)]
