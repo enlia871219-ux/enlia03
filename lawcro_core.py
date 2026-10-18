@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-19-v02"
+BUILD_ID = "2026-10-19-v03"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -375,14 +375,25 @@ def background_scroll(hwnd, x, y, dy, log=None):
     if child and int(child) != hwnd:
         targets.append(int(child))
     targets.append(hwnd)
+    # Post first so the target's own message loop can process the wheel event;
+    # then also try synchronous delivery to each candidate window. API success
+    # only confirms message delivery, not that the game consumed the input.
+    delivered = False
+    for target in targets:
+        try:
+            posted = bool(user32.PostMessageW(target, 0x020A, wparam, lparam))
+            diag(f"백그라운드 휠 PostMessage: HWND={target}, 방향={'위' if delta > 0 else '아래'}, delta={delta}, 화면좌표=({pt.x},{pt.y}), 성공={posted}")
+            delivered = delivered or posted
+        except Exception as e:
+            diag(f"백그라운드 휠 PostMessage 예외 HWND={target}: {type(e).__name__}")
     for target in targets:
         try:
             result = user32.SendMessageW(target, 0x020A, wparam, lparam)
-            diag(f"백그라운드 휠 전송: HWND={target}, 방향={'위' if delta > 0 else '아래'}, delta={delta}, 화면좌표=({pt.x},{pt.y}), 반환={result}")
-            return True
-        except Exception:
-            continue
-    return False
+            diag(f"백그라운드 휠 SendMessage: HWND={target}, delta={delta}, 반환={result} (게임 처리 여부 미확인)")
+            delivered = True
+        except Exception as e:
+            diag(f"백그라운드 휠 SendMessage 예외 HWND={target}: {type(e).__name__}")
+    return delivered
 
 
 def grab_window(hwnd):
@@ -402,12 +413,26 @@ def grab_window(hwnd):
     try:
         ok=False
         if bmp:
-            # Keep the previously working capture flags for Unity/GPU windows.
-            # PW_CLIENTONLY can return a non-matching/blank client image on some
-            # Unity render paths, breaking recognition in both foreground and background.
-            ok=bool(user32.PrintWindow(hwnd,memdc,2))
-            if not ok:
-                ok=bool(user32.PrintWindow(hwnd,memdc,0))
+            # Prefer a client-only capture while requesting full rendering.
+            # PW_RENDERFULLCONTENT alone can include non-client decorations in a
+            # client-sized bitmap, shifting template coordinates from click coordinates.
+            for flags in (3, 1, 2, 0):
+                ok=bool(user32.PrintWindow(hwnd,memdc,flags))
+                if not ok:
+                    continue
+                class _ProbeBITMAPINFOHEADER(ctypes.Structure):
+                    _fields_=[('biSize',ctypes.wintypes.DWORD),('biWidth',ctypes.wintypes.LONG),('biHeight',ctypes.wintypes.LONG),('biPlanes',ctypes.wintypes.WORD),('biBitCount',ctypes.wintypes.WORD),('biCompression',ctypes.wintypes.DWORD),('biSizeImage',ctypes.wintypes.DWORD),('biXPelsPerMeter',ctypes.wintypes.LONG),('biYPelsPerMeter',ctypes.wintypes.LONG),('biClrUsed',ctypes.wintypes.DWORD),('biClrImportant',ctypes.wintypes.DWORD)]
+                _probe_bmi=type('_ProbeBITMAPINFO', (ctypes.Structure,), {'_fields_':[('bmiHeader',_ProbeBITMAPINFOHEADER),('bmiColors',ctypes.c_uint32*3)]})()
+                _probe_bmi.bmiHeader.biSize=ctypes.sizeof(_ProbeBITMAPINFOHEADER)
+                _probe_bmi.bmiHeader.biWidth=w; _probe_bmi.bmiHeader.biHeight=-h
+                _probe_bmi.bmiHeader.biPlanes=1; _probe_bmi.bmiHeader.biBitCount=32; _probe_bmi.bmiHeader.biCompression=0
+                _probe_buf=(ctypes.c_ubyte*(w*h*4))()
+                if gdi32.GetDIBits(memdc,bmp,0,h,ctypes.byref(_probe_buf),ctypes.byref(_probe_bmi),0)>0:
+                    _probe_arr=np.frombuffer(_probe_buf,dtype=np.uint8).reshape((h,w,4))
+                    _probe_gray=cv2.cvtColor(_probe_arr,cv2.COLOR_BGRA2GRAY)
+                    if float(_probe_gray.std())>2.0 and float(_probe_gray.mean())>1.0:
+                        break
+                ok=False
         if ok:
             class BITMAPINFOHEADER(ctypes.Structure):
                 _fields_=[('biSize',ctypes.wintypes.DWORD),('biWidth',ctypes.wintypes.LONG),('biHeight',ctypes.wintypes.LONG),('biPlanes',ctypes.wintypes.WORD),('biBitCount',ctypes.wintypes.WORD),('biCompression',ctypes.wintypes.DWORD),('biSizeImage',ctypes.wintypes.DWORD),('biXPelsPerMeter',ctypes.wintypes.LONG),('biYPelsPerMeter',ctypes.wintypes.LONG),('biClrUsed',ctypes.wintypes.DWORD),('biClrImportant',ctypes.wintypes.DWORD)]
