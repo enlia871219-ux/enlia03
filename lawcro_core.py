@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-19-v03"
+BUILD_ID = "2026-10-19-v04"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -320,13 +320,32 @@ def background_click(hwnd, x, y, log=None):
             diag(f"백그라운드 진단: child HWND={child} class={_window_class_name(user32, child)} client=({child_pt.x},{child_pt.y})")
     targets.append((hwnd, x, y))
 
-    # Queue the click to the render child first, then try synchronous delivery.
-    # Keep the cursor at the requested screen point while the messages are sent.
+    # A background target may not process queued mouse messages while its
+    # window is inactive. In that case, deliver synchronously first so the
+    # target's window procedure runs before we restore the physical cursor.
+    # For a foreground target, retain the queued path used by the working mode.
+    foreground = int(user32.GetForegroundWindow() or 0)
+    target_active = foreground == hwnd or bool(user32.IsChild(hwnd, foreground))
+    diag(
+        f"백그라운드 진단: 입력 상태 target_active={target_active}, "
+        f"foregroundHWND={foreground}, targetHWND={hwnd}"
+    )
+
     cursor = ctypes.wintypes.POINT()
     got_cursor = bool(user32.GetCursorPos(ctypes.byref(cursor)))
     old_pos = (int(cursor.x), int(cursor.y)) if got_cursor else None
     try:
         user32.SetCursorPos(int(screen_pt.x), int(screen_pt.y))
+        if not target_active:
+            for target, tx, ty in targets:
+                if send_sequence(target, tx, ty):
+                    diag(
+                        f"백그라운드 진단: 비활성 창 동기 입력 전달 완료 HWND={target}; "
+                        "실제 게임 처리 여부는 로그만으로 확정할 수 없음"
+                    )
+                    return True
+            return False
+
         for target, tx, ty in targets:
             if post_sequence(target, tx, ty):
                 diag(f"백그라운드 진단: PostMessage API 성공 HWND={target}; 게임 입력 처리 여부는 미확인")
@@ -413,10 +432,12 @@ def grab_window(hwnd):
     try:
         ok=False
         if bmp:
-            # Prefer a client-only capture while requesting full rendering.
-            # PW_RENDERFULLCONTENT alone can include non-client decorations in a
-            # client-sized bitmap, shifting template coordinates from click coordinates.
-            for flags in (3, 1, 2, 0):
+            # Try PW_CLIENTONLY by itself first. In windowed mode, combining
+            # PW_CLIENTONLY with PW_RENDERFULLCONTENT can produce a nonblank frame
+            # whose pixel origin does not match the client coordinates used for clicks.
+            # Keep the combined/full-content variants as fallbacks for renderers that
+            # do not return usable client pixels with flag 1.
+            for flags in (1, 3, 2, 0):
                 ok=bool(user32.PrintWindow(hwnd,memdc,flags))
                 if not ok:
                     continue
