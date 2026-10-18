@@ -11,6 +11,30 @@ from dataclasses import dataclass, asdict, field, fields as dataclass_fields
 from datetime import datetime
 from pathlib import Path
 
+# Keep screen-capture coordinates (MSS), cursor coordinates (pynput/Win32),
+# and Qt window geometry on the same physical-pixel coordinate system.
+def _enable_windows_dpi_awareness():
+    if os.name != "nt":
+        return
+    try:
+        # PROCESS_PER_MONITOR_DPI_AWARE_V2
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except Exception:
+        pass
+    try:
+        # PROCESS_PER_MONITOR_DPI_AWARE
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+_enable_windows_dpi_awareness()
+
 import cv2
 import numpy as np
 import mss
@@ -29,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-18-WINDOWCAP-01"
+BUILD_ID = "2026-10-19-WHEEL-DPI-01"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -309,6 +333,52 @@ def background_click(hwnd, x, y, log=None):
     finally:
         if old_pos is not None:
             user32.SetCursorPos(old_pos[0], old_pos[1])
+
+def background_scroll(hwnd, x, y, dy, log=None):
+    """Send vertical wheel input to a target window without activating it.
+
+    x/y are the recorded desktop coordinates. Convert them to the target's
+    current client coordinates so the action still follows a moved window.
+    WM_MOUSEWHEEL's lParam uses screen coordinates, unlike mouse-button messages.
+    """
+    def diag(message):
+        if callable(log):
+            try:
+                log(message)
+            except Exception:
+                pass
+
+    if os.name != "nt" or not hwnd or not ctypes.windll.user32.IsWindow(int(hwnd)):
+        return False
+    user32 = ctypes.windll.user32
+    hwnd = int(hwnd)
+    ox, oy = window_client_origin(hwnd)
+    client_x, client_y = int(x) - int(ox), int(y) - int(oy)
+    pt = ctypes.wintypes.POINT(client_x, client_y)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(pt)):
+        diag("백그라운드 휠 실패: ClientToScreen 실패")
+        return False
+
+    # A pynput wheel delta is expressed in notches; Win32 uses WHEEL_DELTA=120.
+    delta = int(dy) * 120
+    if delta == 0:
+        return True
+    wparam = (delta & 0xFFFF) << 16
+    lparam = ((int(pt.y) & 0xFFFF) << 16) | (int(pt.x) & 0xFFFF)
+    child = user32.ChildWindowFromPointEx(hwnd, ctypes.wintypes.POINT(client_x, client_y), 0)
+    targets = []
+    if child and int(child) != hwnd:
+        targets.append(int(child))
+    targets.append(hwnd)
+    for target in targets:
+        try:
+            result = user32.SendMessageW(target, 0x020A, wparam, lparam)
+            diag(f"백그라운드 휠 전송: HWND={target}, 방향={'위' if delta > 0 else '아래'}, delta={delta}, 화면좌표=({pt.x},{pt.y}), 반환={result}")
+            return True
+        except Exception:
+            continue
+    return False
+
 
 def grab_window(hwnd):
     """Capture the client area with PrintWindow, then fall back to MSS for GPU-rendered windows."""
@@ -778,15 +848,20 @@ class RecordingEditorDialog(QDialog):
 
         root.addWidget(QLabel(f"녹화된 클릭 수: {len(step.events)}개"))
         table = QTableWidget(len(step.events), 3)
-        table.setHorizontalHeaderLabels(["순서", "좌표", "이전 동작 후 대기(초)"])
+        table.setHorizontalHeaderLabels(["순서", "동작 / 좌표", "이전 동작 후 대기(초)"])
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         for i, ev in enumerate(step.events):
             table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            table.setItem(i, 1, QTableWidgetItem(f"({int(ev.get('x',0))}, {int(ev.get('y',0))})"))
+            if ev.get('type') == 'scroll':
+                dy = int(ev.get('dy', 0))
+                action = f"휠 {'위' if dy > 0 else '아래'} (x{abs(dy)}) @ ({int(ev.get('x',0))}, {int(ev.get('y',0))})"
+            else:
+                action = f"클릭 ({int(ev.get('x',0))}, {int(ev.get('y',0))})"
+            table.setItem(i, 1, QTableWidgetItem(action))
             table.setItem(i, 2, QTableWidgetItem(f"{float(ev.get('wait',0)):.4f}"))
         root.addWidget(table, 1)
-        root.addWidget(QLabel("※ 녹화된 클릭 순서/좌표는 이 창에서 변경하지 않고, 실행 후 대기·정확도·사용 여부만 편집합니다."))
+        root.addWidget(QLabel("※ 녹화된 클릭·휠 동작은 이 창에서 변경하지 않고, 실행 후 대기·정확도·사용 여부만 편집합니다."))
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -884,14 +959,28 @@ class MacroWorker(threading.Thread):
                             if self.stop_evt.is_set(): break
                             self._wait(float(ev.get('wait', 0)))
                             x=int(ev.get('x', 0)); y=int(ev.get('y', 0))
-                            if self.background:
-                                if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
-                                ox,oy=window_client_origin(self.target_hwnd) if self.target_hwnd else (0,0)
-                                if not background_click(self.target_hwnd, x-ox, y-oy):
-                                    self.sig.run.emit(f"[{now()}] 백그라운드 클릭 실패: 대상 창을 찾지 못했거나 입력을 받지 않습니다.")
+                            if ev.get('type') == 'scroll':
+                                dy=int(ev.get('dy', 0))
+                                if self.background:
+                                    if not self.target_hwnd:
+                                        self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
+                                    ok=background_scroll(
+                                        self.target_hwnd, x, y, dy,
+                                        log=lambda message: self.sig.run.emit(f"[{now()}] {message}")
+                                    )
+                                else:
+                                    self.mouse.position=(x,y)
+                                    self.mouse.scroll(0, dy)
+                                    ok=True
+                                self.sig.run.emit(f"[{now()}] 휠 {'위' if dy > 0 else '아래'} 실행: ({x},{y}), delta={dy}, 전송={'성공' if ok else '실패'}")
                             else:
-                                self.mouse.position=(x,y); self.mouse.click(mouse.Button.left)
-                            self.sig.run.emit(f"[{now()}] 클릭 실행: ({int(ev.get('x',0))},{int(ev.get('y',0))})")
+                                if self.background:
+                                    if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
+                                    if not background_click(self.target_hwnd, x, y):
+                                        self.sig.run.emit(f"[{now()}] 백그라운드 클릭 실패: 대상 창을 찾지 못했거나 입력을 받지 않습니다.")
+                                else:
+                                    self.mouse.position=(x,y); self.mouse.click(mouse.Button.left)
+                                self.sig.run.emit(f"[{now()}] 클릭 실행: ({x},{y})")
                     elif st.type=='image':
                         found=None
                         attempts=0
@@ -1569,13 +1658,33 @@ class MainWindow(QMainWindow):
         self.recording=True; self.record_last=time.monotonic(); self.record_events=[]
         self.log_event(f'[{now()}] 녹화 시작')
         self.update_button_states()
-        def on_click(x,y,button,pressed):
-            if not self.recording or not pressed or button!=mouse.Button.left:return
-            elapsed=time.monotonic()-self.record_last; self.record_last=time.monotonic()
+        def append_event(event, label):
+            if not self.recording:
+                return
+            elapsed=time.monotonic()-self.record_last
+            self.record_last=time.monotonic()
             wait=elapsed if self.record_events else 0.0
-            self.record_events.append({'x':int(x),'y':int(y),'wait':round(wait,4)})
-            self.log_event(f'[{now()}] 녹화 중 클릭: ({int(x)},{int(y)}) / 이전 클릭 후 {wait:.2f}s')
-        self.record_listener=mouse.Listener(on_click=on_click); self.record_listener.daemon=True; self.record_listener.start()
+            event['wait']=round(wait,4)
+            self.record_events.append(event)
+            self.log_event(f'[{now()}] 녹화 중 {label} / 이전 동작 후 {wait:.2f}s')
+
+        def on_click(x,y,button,pressed):
+            if not self.recording or not pressed or button!=mouse.Button.left:
+                return
+            append_event({'type':'click','x':int(x),'y':int(y)}, f'클릭: ({int(x)},{int(y)})')
+
+        def on_scroll(x,y,dx,dy):
+            if not self.recording or int(dy)==0:
+                return
+            direction='위' if int(dy)>0 else '아래'
+            append_event(
+                {'type':'scroll','x':int(x),'y':int(y),'dx':int(dx),'dy':int(dy)},
+                f'휠 {direction}: ({int(x)},{int(y)}) delta={int(dy)}'
+            )
+
+        self.record_listener=mouse.Listener(on_click=on_click, on_scroll=on_scroll)
+        self.record_listener.daemon=True
+        self.record_listener.start()
 
     def stop_record(self):
         if not self.recording:return
@@ -1589,7 +1698,7 @@ class MainWindow(QMainWindow):
             name=f'녹화_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
             self.steps.append(Step(type='recording', name=name, wait=0, accuracy=self.default_acc.value(), events=events))
             self.refresh_table()
-            self.log_event(f'[{now()}] 녹화 중지 → 하나의 녹화 매크로로 추가 ({len(events)}개 클릭)')
+            self.log_event(f'[{now()}] 녹화 중지 → 하나의 녹화 매크로로 추가 ({len(events)}개 동작)')
         else:
             self.log_event(f'[{now()}] 녹화 중지 → 녹화된 동작 없음')
         self.record_events=[]
