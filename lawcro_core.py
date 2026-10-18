@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-19-v12"
+BUILD_ID = "2026-10-19-v13"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -444,50 +444,60 @@ def background_scroll(hwnd, x, y, dy, log=None):
             if old_pos is not None:
                 user32.SetCursorPos(old_pos[0], old_pos[1])
 
-    # Inactive-window wheel experiment v11: briefly position the real cursor at
-    # the wheel point (matching the working click path), send focus/move/wheel
-    # messages, then restore the cursor. Never call SetForegroundWindow here.
-    WM_ACTIVATE, WM_SETFOCUS, WM_KILLFOCUS = 0x0006, 0x0007, 0x0008
-    WA_INACTIVE, WA_ACTIVE = 0, 1
+    # Inactive-window wheel path v13:
+    # Temporarily attach input queues so SetFocus can target the game without
+    # calling SetForegroundWindow. Send the wheel synchronously, then restore
+    # the prior focus and detach. This does not intentionally activate the game.
+    WM_MOUSEMOVE = 0x0200
+    WM_MOUSEWHEEL = 0x020A
     cursor = ctypes.wintypes.POINT()
     got_cursor = bool(user32.GetCursorPos(ctypes.byref(cursor)))
     old_pos = (int(cursor.x), int(cursor.y)) if got_cursor else None
+    current_thread = int(user32.GetCurrentThreadId())
+    target_thread = int(user32.GetWindowThreadProcessId(hwnd, None))
+    foreground_hwnd = int(user32.GetForegroundWindow() or 0)
+    foreground_thread = int(user32.GetWindowThreadProcessId(foreground_hwnd, None)) if foreground_hwnd else 0
+    attached = False
+    old_focus = 0
     try:
         user32.SetCursorPos(screen_x, screen_y)
         time.sleep(0.03)
-        user32.SendMessageW(hwnd, WM_ACTIVATE, WA_ACTIVE, 0)
-        user32.SendMessageW(target, WM_SETFOCUS, 0, 0)
-        diag(
-            f"백그라운드 휠 실험 v11: 커서를 휠 좌표로 이동 screen=({screen_x},{screen_y}); "
-            "실제 foreground 변경 없음"
-        )
+
+        # Attach to the target thread's input queue only for the duration of
+        # this wheel event; never call SetForegroundWindow or SetActiveWindow.
+        if target_thread and current_thread != target_thread:
+            attached = bool(user32.AttachThreadInput(current_thread, target_thread, True))
+        if foreground_thread and foreground_thread not in (current_thread, target_thread):
+            # Keep the existing foreground thread's queue connected while
+            # restoring focus, but do not activate or raise its window.
+            user32.AttachThreadInput(current_thread, foreground_thread, True)
+
+        if attached:
+            old_focus = int(user32.GetFocus() or 0)
+            user32.SetFocus(hwnd)
+
         move_lparam = ((client_y & 0xFFFF) << 16) | (client_x & 0xFFFF)
-        move_result = user32.SendMessageW(target, 0x0200, 0, move_lparam)  # WM_MOUSEMOVE
+        user32.SendMessageW(hwnd, WM_MOUSEMOVE, 0, move_lparam)
+        time.sleep(0.02)
+        user32.SendMessageW(hwnd, WM_MOUSEWHEEL, wparam, lparam)
         diag(
-            f"백그라운드 휠 실험: 포커스 힌트 후 WM_MOUSEMOVE HWND={target}, "
-            f"client=({client_x},{client_y}), 반환={move_result}"
+            f"백그라운드 휠 v13: 입력 큐 연결={attached}, targetHWND={hwnd}, "
+            f"foregroundHWND={foreground_hwnd}, targetThread={target_thread}, "
+            f"delta={delta}; SetForegroundWindow 미사용"
         )
         time.sleep(0.05)
-        # Queue the wheel event instead of calling the window procedure synchronously.
-        # Some game loops only process posted input while pumping their normal message queue.
-        result = bool(user32.PostMessageW(target, 0x020A, wparam, lparam))  # WM_MOUSEWHEEL
-        diag(
-            f"백그라운드 휠 실험 v12: WM_MOUSEWHEEL을 PostMessage로 큐에 등록 "
-            f"HWND={target}, delta={delta}, 등록성공={result}; 게임 처리 여부 미확인"
-        )
-        time.sleep(0.10)
-        user32.SendMessageW(target, WM_KILLFOCUS, 0, 0)
-        user32.SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0)
+        if attached and old_focus:
+            user32.SetFocus(old_focus)
         return True
     except Exception as e:
-        try:
-            user32.SendMessageW(target, WM_KILLFOCUS, 0, 0)
-            user32.SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0)
-        except Exception:
-            pass
-        diag(f"백그라운드 휠 실험 예외 HWND={target}: {type(e).__name__}: {e}")
+        diag(f"백그라운드 휠 v13 예외 HWND={hwnd}: {type(e).__name__}: {e}")
         return False
     finally:
+        if attached:
+            try:
+                user32.AttachThreadInput(current_thread, target_thread, False)
+            except Exception:
+                pass
         if old_pos is not None:
             user32.SetCursorPos(old_pos[0], old_pos[1])
 
