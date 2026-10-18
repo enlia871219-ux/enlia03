@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-19-v13"
+BUILD_ID = "2026-10-19-v14"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -379,11 +379,11 @@ def background_click(hwnd, x, y, log=None):
             user32.SetCursorPos(old_pos[0], old_pos[1])
 
 def background_scroll(hwnd, x, y, dy, log=None):
-    """Send a vertical wheel event using the recorded desktop coordinates.
+    """Deliver a wheel message to the target's actual window under the recorded point.
 
-    WM_MOUSEWHEEL lParam must contain screen coordinates. Do not round-trip
-    through ClientToScreen here: keeping the original screen point avoids DPI /
-    coordinate-virtualization offsets observed in some window configurations.
+    This path deliberately does not focus, activate, or raise the target window.
+    Some games ignore synthetic wheel messages entirely; API success is not proof
+    that the game consumed the event.
     """
     def diag(message):
         if callable(log):
@@ -392,10 +392,13 @@ def background_scroll(hwnd, x, y, dy, log=None):
             except Exception:
                 pass
 
-    if os.name != "nt" or not hwnd or not ctypes.windll.user32.IsWindow(int(hwnd)):
+    if os.name != "nt" or not hwnd:
         return False
     user32 = ctypes.windll.user32
     hwnd = int(hwnd)
+    if not user32.IsWindow(hwnd):
+        diag(f"백그라운드 휠: 유효하지 않은 HWND={hwnd}")
+        return False
 
     screen_x, screen_y = int(x), int(y)
     delta = int(dy) * 120
@@ -403,10 +406,10 @@ def background_scroll(hwnd, x, y, dy, log=None):
         diag("백그라운드 휠: delta=0이라 입력 생략")
         return True
 
-    # WM_MOUSEWHEEL expects the wheel delta in the high word of wParam and
-    # the cursor's SCREEN position in lParam (unlike WM_LBUTTONDOWN).
+    WM_MOUSEMOVE = 0x0200
+    WM_MOUSEWHEEL = 0x020A
     wparam = (delta & 0xFFFF) << 16
-    lparam = ((screen_y & 0xFFFF) << 16) | (screen_x & 0xFFFF)
+    wheel_lparam = ((screen_y & 0xFFFF) << 16) | (screen_x & 0xFFFF)
 
     ox, oy = window_client_origin(hwnd)
     client_x, client_y = screen_x - int(ox), screen_y - int(oy)
@@ -414,17 +417,20 @@ def background_scroll(hwnd, x, y, dy, log=None):
         hwnd, ctypes.wintypes.POINT(client_x, client_y), 0
     )
     target = int(child) if child and int(child) != hwnd else hwnd
+    target_x, target_y = client_x, client_y
+    if target != hwnd:
+        child_pt = ctypes.wintypes.POINT(screen_x, screen_y)
+        if user32.ScreenToClient(target, ctypes.byref(child_pt)):
+            target_x, target_y = int(child_pt.x), int(child_pt.y)
+
+    foreground = int(user32.GetForegroundWindow() or 0)
+    target_active = foreground == hwnd or bool(user32.IsChild(hwnd, foreground))
     diag(
         f"백그라운드 휠 대상: topHWND={hwnd}, childHWND={target if target != hwnd else 0}, "
         f"targetHWND={target}, screen=({screen_x},{screen_y}), "
-        f"client=({client_x},{client_y}), delta={delta}"
+        f"targetClient=({target_x},{target_y}), delta={delta}, active={target_active}"
     )
 
-    # If the game is the foreground window, prefer a real OS wheel input.
-    # Background WM_MOUSEWHEEL messages can report successful delivery while
-    # Unity's input layer ignores them.
-    foreground = int(user32.GetForegroundWindow() or 0)
-    target_active = foreground == hwnd or bool(user32.IsChild(hwnd, foreground))
     if target_active:
         cursor = ctypes.wintypes.POINT()
         got_cursor = bool(user32.GetCursorPos(ctypes.byref(cursor)))
@@ -432,81 +438,36 @@ def background_scroll(hwnd, x, y, dy, log=None):
         try:
             user32.SetCursorPos(screen_x, screen_y)
             time.sleep(0.03)
-            user32.mouse_event(0x0800, 0, 0, delta, 0)  # MOUSEEVENTF_WHEEL
+            user32.mouse_event(0x0800, 0, 0, delta, 0)
             diag(
-                f"백그라운드 휠 실제 입력: targetHWND={hwnd}, foregroundHWND={foreground}, "
-                f"방향={'위' if delta > 0 else '아래'}, delta={delta}, screen=({screen_x},{screen_y})"
+                f"휠 실제 입력: 활성 대상 HWND={hwnd}, 방향={'위' if delta > 0 else '아래'}, "
+                f"delta={delta}, screen=({screen_x},{screen_y})"
             )
             return True
         except Exception as e:
-            diag(f"백그라운드 휠 실제 입력 예외: {type(e).__name__}: {e}")
+            diag(f"휠 실제 입력 예외: {type(e).__name__}: {e}")
+            return False
         finally:
             if old_pos is not None:
                 user32.SetCursorPos(old_pos[0], old_pos[1])
 
-    # Inactive-window wheel path v13:
-    # Temporarily attach input queues so SetFocus can target the game without
-    # calling SetForegroundWindow. Send the wheel synchronously, then restore
-    # the prior focus and detach. This does not intentionally activate the game.
-    WM_MOUSEMOVE = 0x0200
-    WM_MOUSEWHEEL = 0x020A
-    cursor = ctypes.wintypes.POINT()
-    got_cursor = bool(user32.GetCursorPos(ctypes.byref(cursor)))
-    old_pos = (int(cursor.x), int(cursor.y)) if got_cursor else None
-    current_thread = int(user32.GetCurrentThreadId())
-    target_thread = int(user32.GetWindowThreadProcessId(hwnd, None))
-    foreground_hwnd = int(user32.GetForegroundWindow() or 0)
-    foreground_thread = int(user32.GetWindowThreadProcessId(foreground_hwnd, None)) if foreground_hwnd else 0
-    attached = False
-    foreground_attached = False
-    old_focus = 0
+    # v14: target the render/input child when one exists. The previous version
+    # detected this child but still sent every message to the top-level HWND.
+    # Do not call SetFocus/AttachThreadInput/SetForegroundWindow: the game must
+    # remain in the background.
     try:
-        user32.SetCursorPos(screen_x, screen_y)
-        time.sleep(0.03)
-
-        # Attach to the target thread's input queue only for the duration of
-        # this wheel event; never call SetForegroundWindow or SetActiveWindow.
-        if target_thread and current_thread != target_thread:
-            attached = bool(user32.AttachThreadInput(current_thread, target_thread, True))
-        if foreground_thread and foreground_thread not in (current_thread, target_thread):
-            # Keep the existing foreground thread's queue connected while
-            # restoring focus, but do not activate or raise its window.
-            foreground_attached = bool(user32.AttachThreadInput(current_thread, foreground_thread, True))
-
-        if attached:
-            old_focus = int(user32.GetFocus() or 0)
-            user32.SetFocus(hwnd)
-
-        move_lparam = ((client_y & 0xFFFF) << 16) | (client_x & 0xFFFF)
-        user32.SendMessageW(hwnd, WM_MOUSEMOVE, 0, move_lparam)
-        time.sleep(0.02)
-        user32.SendMessageW(hwnd, WM_MOUSEWHEEL, wparam, lparam)
+        move_lparam = ((target_y & 0xFFFF) << 16) | (target_x & 0xFFFF)
+        user32.SendMessageW(target, WM_MOUSEMOVE, 0, move_lparam)
+        result = user32.SendMessageW(target, WM_MOUSEWHEEL, wparam, wheel_lparam)
         diag(
-            f"백그라운드 휠 v13: 입력 큐 연결={attached}, targetHWND={hwnd}, "
-            f"foregroundHWND={foreground_hwnd}, targetThread={target_thread}, "
-            f"delta={delta}; SetForegroundWindow 미사용"
+            f"백그라운드 휠 v14: SendMessage 대상HWND={target}, topHWND={hwnd}, "
+            f"결과={result}, 방향={'위' if delta > 0 else '아래'}, delta={delta}; "
+            "창 활성화/포커스 변경 API 미사용; 게임 처리 여부는 미확인"
         )
-        time.sleep(0.05)
-        if attached and old_focus:
-            user32.SetFocus(old_focus)
         return True
     except Exception as e:
-        diag(f"백그라운드 휠 v13 예외 HWND={hwnd}: {type(e).__name__}: {e}")
+        diag(f"백그라운드 휠 v14 예외 HWND={target}: {type(e).__name__}: {e}")
         return False
-    finally:
-        if foreground_attached:
-            try:
-                user32.AttachThreadInput(current_thread, foreground_thread, False)
-            except Exception:
-                pass
-        if attached:
-            try:
-                user32.AttachThreadInput(current_thread, target_thread, False)
-            except Exception:
-                pass
-        if old_pos is not None:
-            user32.SetCursorPos(old_pos[0], old_pos[1])
-
 
 def grab_window(hwnd):
     """Capture the client area with PrintWindow, then fall back to MSS for GPU-rendered windows."""
