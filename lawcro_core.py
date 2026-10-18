@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-19-v09"
+BUILD_ID = "2026-10-19-v10"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -453,14 +453,22 @@ def background_scroll(hwnd, x, y, dy, log=None):
     try:
         user32.SendMessageW(hwnd, WM_ACTIVATE, WA_ACTIVE, 0)
         user32.SendMessageW(target, WM_SETFOCUS, 0, 0)
-        diag(f"백그라운드 휠 실험: WM_ACTIVATE/WM_SETFOCUS 전송 top={hwnd}, target={target}; 실제 foreground 변경 없음")
-        time.sleep(0.03)
+        # Unlike the click path, the old wheel path did not send WM_MOUSEMOVE.
+        # Give Unity the pointer position in CLIENT coordinates first; WM_MOUSEWHEEL
+        # itself still requires SCREEN coordinates in lParam.
+        move_lparam = ((client_y & 0xFFFF) << 16) | (client_x & 0xFFFF)
+        move_result = user32.SendMessageW(target, 0x0200, 0, move_lparam)  # WM_MOUSEMOVE
+        diag(
+            f"백그라운드 휠 실험: 포커스 힌트 후 WM_MOUSEMOVE HWND={target}, "
+            f"client=({client_x},{client_y}), 반환={move_result}"
+        )
+        time.sleep(0.05)
         result = user32.SendMessageW(target, 0x020A, wparam, lparam)
-        time.sleep(0.03)
+        time.sleep(0.05)
         user32.SendMessageW(target, WM_KILLFOCUS, 0, 0)
         user32.SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0)
         diag(
-            f"백그라운드 휠 실험: 포커스 힌트+SendMessage HWND={target}, delta={delta}, "
+            f"백그라운드 휠 실험 v10: WM_MOUSEMOVE 후 WM_MOUSEWHEEL HWND={target}, delta={delta}, "
             f"반환={result} (게임 처리 여부 미확인)"
         )
         return True
