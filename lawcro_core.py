@@ -226,14 +226,13 @@ def background_click(hwnd, x, y, log=None):
         diag(f"백그라운드 진단: 비정상 클라이언트 크기 HWND={hwnd} size=({client_w},{client_h})")
         return False
     original_x, original_y = x, y
-    if x >= client_w or y >= client_h:
-        if x == client_w or y == client_h:
-            x = min(x, client_w - 1)
-            y = min(y, client_h - 1)
-            diag(f"백그라운드 진단: 경계 좌표 보정 ({original_x},{original_y}) → ({x},{y}), client_size=({client_w},{client_h})")
-        else:
-            diag(f"백그라운드 진단: 클라이언트 영역 밖 좌표 거부 pos=({x},{y}), client_size=({client_w},{client_h})")
-            return False
+    if x > client_w or y > client_h:
+        diag(f"백그라운드 진단: 클라이언트 영역 밖 좌표 거부 pos=({x},{y}), client_size=({client_w},{client_h})")
+        return False
+    if x == client_w or y == client_h:
+        x = min(x, client_w - 1)
+        y = min(y, client_h - 1)
+        diag(f"백그라운드 진단: 경계 좌표 보정 ({original_x},{original_y}) → ({x},{y}), client_size=({client_w},{client_h})")
     diag(f"백그라운드 진단: 좌표 검증 완료 pos=({x},{y}), client_size=({client_w},{client_h})")
 
     def _window_class_name(api, target):
