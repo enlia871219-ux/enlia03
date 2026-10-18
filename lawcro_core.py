@@ -192,17 +192,35 @@ def window_client_origin(hwnd):
     return (0,0)
 
 
-def background_click(hwnd, x, y):
+def background_click(hwnd, x, y, log=None):
+    """Send a background click and optionally report the exact HWND/coordinate path."""
+    def diag(message):
+        if callable(log):
+            try:
+                log(message)
+            except Exception:
+                pass
+
     """Deliver a click to the Unity render child first, without activating the target."""
     if os.name != 'nt' or not hwnd:
         return False
     user32 = ctypes.windll.user32
     hwnd = int(hwnd)
     if not user32.IsWindow(hwnd):
+        diag(f"백그라운드 진단: 유효하지 않은 HWND={hwnd}")
         return False
     x, y = int(x), int(y)
     if x < 0 or y < 0:
+        diag(f"백그라운드 진단: 음수 클라이언트 좌표 ({x},{y})")
         return False
+
+    def _window_class_name(api, target):
+        try:
+            buf = ctypes.create_unicode_buffer(256)
+            api.GetClassNameW(int(target), buf, len(buf))
+            return buf.value or "?"
+        except Exception:
+            return "?"
 
     WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP = 0x0200, 0x0201, 0x0202
     MK_LBUTTON = 0x0001
@@ -218,6 +236,7 @@ def background_click(hwnd, x, y):
         down = bool(user32.PostMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp))
         time.sleep(0.025)
         up = bool(user32.PostMessageW(target, WM_LBUTTONUP, 0, lp))
+        diag(f"백그라운드 진단: PostMessage HWND={int(target)} 좌표=({tx},{ty}) move={moved} down={down} up={up}")
         return moved and down and up
 
     def send_sequence(target, tx, ty):
@@ -229,6 +248,7 @@ def background_click(hwnd, x, y):
             user32.SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp)
             time.sleep(0.025)
             user32.SendMessageW(target, WM_LBUTTONUP, 0, lp)
+            diag(f"백그라운드 진단: SendMessage HWND={int(target)} 좌표=({tx},{ty}) 호출 완료(게임 처리 여부는 별도)")
             return True
         except Exception:
             return False
@@ -237,14 +257,17 @@ def background_click(hwnd, x, y):
     # top-level HWND can succeed technically while Unity ignores the click.
     screen_pt = ctypes.wintypes.POINT(x, y)
     if not user32.ClientToScreen(hwnd, ctypes.byref(screen_pt)):
+        diag(f"백그라운드 진단: ClientToScreen 실패 HWND={hwnd} 좌표=({x},{y})")
         return False
     child = user32.ChildWindowFromPointEx(hwnd, ctypes.wintypes.POINT(x, y), 0)
     targets = []
+    diag(f"백그라운드 진단: top HWND={hwnd} class={_window_class_name(user32, hwnd)} client=({x},{y}) screen=({screen_pt.x},{screen_pt.y}) child={int(child) if child else 0}")
     if child and int(child) != hwnd:
         child = int(child)
         child_pt = ctypes.wintypes.POINT(screen_pt.x, screen_pt.y)
         if user32.ScreenToClient(child, ctypes.byref(child_pt)):
             targets.append((child, int(child_pt.x), int(child_pt.y)))
+            diag(f"백그라운드 진단: child HWND={child} class={_window_class_name(user32, child)} client=({child_pt.x},{child_pt.y})")
     targets.append((hwnd, x, y))
 
     # Queue the click to the render child first, then try synchronous delivery.
@@ -256,8 +279,10 @@ def background_click(hwnd, x, y):
         user32.SetCursorPos(int(screen_pt.x), int(screen_pt.y))
         for target, tx, ty in targets:
             if post_sequence(target, tx, ty):
+                diag(f"백그라운드 진단: PostMessage API 성공 HWND={target}; 게임 입력 처리 여부는 미확인")
                 return True
             if send_sequence(target, tx, ty):
+                diag(f"백그라운드 진단: SendMessage API 호출 완료 HWND={target}; 게임 입력 처리 여부는 미확인")
                 return True
         return False
     finally:
@@ -983,7 +1008,10 @@ class MacroWorker(threading.Thread):
                                         self.mouse.click(mouse.Button.left)
                                         self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 활성 대상 창 클릭 ({sx},{sy})")
                                     else:
-                                        click_succeeded = background_click(self.target_hwnd, cx, cy)
+                                        click_succeeded = background_click(
+                                            self.target_hwnd, cx, cy,
+                                            log=lambda message: self.sig.run.emit(f"[{now()}] {message}")
+                                        )
                                         if click_succeeded:
                                             self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 비활성 창 클릭 메시지 전송 ({cx},{cy})")
                                         else:
