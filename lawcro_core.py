@@ -976,7 +976,8 @@ class MacroWorker(threading.Thread):
                             else:
                                 if self.background:
                                     if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
-                                    if not background_click(self.target_hwnd, x, y):
+                                    ox,oy=window_client_origin(self.target_hwnd) if self.target_hwnd else (0,0)
+                                    if not background_click(self.target_hwnd, x-ox, y-oy):
                                         self.sig.run.emit(f"[{now()}] 백그라운드 클릭 실패: 대상 창을 찾지 못했거나 입력을 받지 않습니다.")
                                 else:
                                     self.mouse.position=(x,y); self.mouse.click(mouse.Button.left)
