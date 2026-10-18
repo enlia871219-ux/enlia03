@@ -458,6 +458,7 @@ def background_scroll(hwnd, x, y, dy, log=None):
     foreground_hwnd = int(user32.GetForegroundWindow() or 0)
     foreground_thread = int(user32.GetWindowThreadProcessId(foreground_hwnd, None)) if foreground_hwnd else 0
     attached = False
+    foreground_attached = False
     old_focus = 0
     try:
         user32.SetCursorPos(screen_x, screen_y)
@@ -470,7 +471,7 @@ def background_scroll(hwnd, x, y, dy, log=None):
         if foreground_thread and foreground_thread not in (current_thread, target_thread):
             # Keep the existing foreground thread's queue connected while
             # restoring focus, but do not activate or raise its window.
-            user32.AttachThreadInput(current_thread, foreground_thread, True)
+            foreground_attached = bool(user32.AttachThreadInput(current_thread, foreground_thread, True))
 
         if attached:
             old_focus = int(user32.GetFocus() or 0)
@@ -493,6 +494,11 @@ def background_scroll(hwnd, x, y, dy, log=None):
         diag(f"백그라운드 휠 v13 예외 HWND={hwnd}: {type(e).__name__}: {e}")
         return False
     finally:
+        if foreground_attached:
+            try:
+                user32.AttachThreadInput(current_thread, foreground_thread, False)
+            except Exception:
+                pass
         if attached:
             try:
                 user32.AttachThreadInput(current_thread, target_thread, False)
