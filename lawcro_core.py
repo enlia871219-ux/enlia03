@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-19-v11"
+BUILD_ID = "2026-10-19-v12"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -468,14 +468,16 @@ def background_scroll(hwnd, x, y, dy, log=None):
             f"client=({client_x},{client_y}), 반환={move_result}"
         )
         time.sleep(0.05)
-        result = user32.SendMessageW(target, 0x020A, wparam, lparam)
-        time.sleep(0.05)
+        # Queue the wheel event instead of calling the window procedure synchronously.
+        # Some game loops only process posted input while pumping their normal message queue.
+        result = bool(user32.PostMessageW(target, 0x020A, wparam, lparam))  # WM_MOUSEWHEEL
+        diag(
+            f"백그라운드 휠 실험 v12: WM_MOUSEWHEEL을 PostMessage로 큐에 등록 "
+            f"HWND={target}, delta={delta}, 등록성공={result}; 게임 처리 여부 미확인"
+        )
+        time.sleep(0.10)
         user32.SendMessageW(target, WM_KILLFOCUS, 0, 0)
         user32.SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0)
-        diag(
-            f"백그라운드 휠 실험 v11: 커서 이동+WM_MOUSEMOVE 후 WM_MOUSEWHEEL "
-            f"HWND={target}, delta={delta}, 반환={result} (게임 처리 여부 미확인)"
-        )
         return True
     except Exception as e:
         try:
