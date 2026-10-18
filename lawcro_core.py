@@ -557,6 +557,7 @@ class StepEditor(QDialog):
         self.cx = QSpinBox(); self.cx.setRange(-10000,10000); self.cx.setValue(step.click_x)
         self.cy = QSpinBox(); self.cy.setRange(-10000,10000); self.cy.setValue(step.click_y)
         self.input_key = str(getattr(step, "input_key", "") or "")
+        self.click_absolute = bool(getattr(step, "click_absolute", False))
         self.key_button = QPushButton(f"현재 입력 키 : {self.input_key}" if self.input_key else "클릭 후 원하는 키 입력")
         self.key_button.clicked.connect(self.capture_input_key)
         info.addRow("이름", self.name); info.addRow("대기시간(초)", self.wait); info.addRow("이미지 대기(초)", self.image_wait); info.addRow("이미지 정확도", self.acc); info.addRow("클릭 위치", self.click)
@@ -675,7 +676,7 @@ class StepEditor(QDialog):
         # The picker returns desktop screen coordinates. Convert to target-client
         # coordinates immediately before dispatching the click.
         self.cx.setValue(int(p[0])); self.cy.setValue(int(p[1]))
-        self.step.click_absolute = True
+        self.click_absolute = True
         self.click.setCurrentIndex(1)
     def _failure_changed(self):
         retry = self.fail_action.currentIndex() == 0
@@ -686,7 +687,7 @@ class StepEditor(QDialog):
         self.fail_target.setToolTip("‘특정 단계로 이동’에서만 수정할 수 있습니다." if not goto else "")
     def accept(self):
         self.step.name=self.name.text().strip() or Path(self.step.path).name
-        self.step.wait=self.wait.value(); self.step.image_wait=self.image_wait.value(); self.step.click_delay=self.click_delay.value(); self.step.accuracy=self.acc.value(); self.step.click_mode='center' if self.click.currentIndex()==0 else 'offset'; self.step.click_x=self.cx.value(); self.step.click_y=self.cy.value(); self.step.input_key=self.input_key
+        self.step.wait=self.wait.value(); self.step.image_wait=self.image_wait.value(); self.step.click_delay=self.click_delay.value(); self.step.accuracy=self.acc.value(); self.step.click_mode='center' if self.click.currentIndex()==0 else 'offset'; self.step.click_x=self.cx.value(); self.step.click_y=self.cy.value(); self.step.input_key=self.input_key; self.step.click_absolute=self.click_absolute
         if self.click.currentIndex()==0: self.step.click_absolute=False
         self.step.failure_action = ['retry','ignore','goto'][self.fail_action.currentIndex()]
         self.step.retry_count = self.retry_count.value()
