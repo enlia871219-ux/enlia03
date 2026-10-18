@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-19-v10"
+BUILD_ID = "2026-10-19-v11"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -444,18 +444,23 @@ def background_scroll(hwnd, x, y, dy, log=None):
             if old_pos is not None:
                 user32.SetCursorPos(old_pos[0], old_pos[1])
 
-    # Inactive windows cannot receive physical input without activating them.
-    # v09 experiment: synthetic activation/focus hints around the wheel message.
-    # This does not call SetForegroundWindow and does not intentionally change
-    # the real foreground HWND. The game may ignore these hints or react to them.
+    # Inactive-window wheel experiment v11: briefly position the real cursor at
+    # the wheel point (matching the working click path), send focus/move/wheel
+    # messages, then restore the cursor. Never call SetForegroundWindow here.
     WM_ACTIVATE, WM_SETFOCUS, WM_KILLFOCUS = 0x0006, 0x0007, 0x0008
     WA_INACTIVE, WA_ACTIVE = 0, 1
+    cursor = ctypes.wintypes.POINT()
+    got_cursor = bool(user32.GetCursorPos(ctypes.byref(cursor)))
+    old_pos = (int(cursor.x), int(cursor.y)) if got_cursor else None
     try:
+        user32.SetCursorPos(screen_x, screen_y)
+        time.sleep(0.03)
         user32.SendMessageW(hwnd, WM_ACTIVATE, WA_ACTIVE, 0)
         user32.SendMessageW(target, WM_SETFOCUS, 0, 0)
-        # Unlike the click path, the old wheel path did not send WM_MOUSEMOVE.
-        # Give Unity the pointer position in CLIENT coordinates first; WM_MOUSEWHEEL
-        # itself still requires SCREEN coordinates in lParam.
+        diag(
+            f"백그라운드 휠 실험 v11: 커서를 휠 좌표로 이동 screen=({screen_x},{screen_y}); "
+            "실제 foreground 변경 없음"
+        )
         move_lparam = ((client_y & 0xFFFF) << 16) | (client_x & 0xFFFF)
         move_result = user32.SendMessageW(target, 0x0200, 0, move_lparam)  # WM_MOUSEMOVE
         diag(
@@ -468,8 +473,8 @@ def background_scroll(hwnd, x, y, dy, log=None):
         user32.SendMessageW(target, WM_KILLFOCUS, 0, 0)
         user32.SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0)
         diag(
-            f"백그라운드 휠 실험 v10: WM_MOUSEMOVE 후 WM_MOUSEWHEEL HWND={target}, delta={delta}, "
-            f"반환={result} (게임 처리 여부 미확인)"
+            f"백그라운드 휠 실험 v11: 커서 이동+WM_MOUSEMOVE 후 WM_MOUSEWHEEL "
+            f"HWND={target}, delta={delta}, 반환={result} (게임 처리 여부 미확인)"
         )
         return True
     except Exception as e:
@@ -480,7 +485,9 @@ def background_scroll(hwnd, x, y, dy, log=None):
             pass
         diag(f"백그라운드 휠 실험 예외 HWND={target}: {type(e).__name__}: {e}")
         return False
-
+    finally:
+        if old_pos is not None:
+            user32.SetCursorPos(old_pos[0], old_pos[1])
 
 
 def grab_window(hwnd):
