@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-19-v04"
+BUILD_ID = "2026-10-19-v05"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -359,11 +359,11 @@ def background_click(hwnd, x, y, log=None):
             user32.SetCursorPos(old_pos[0], old_pos[1])
 
 def background_scroll(hwnd, x, y, dy, log=None):
-    """Send vertical wheel input to a target window without activating it.
+    """Send a vertical wheel event using the recorded desktop coordinates.
 
-    x/y are the recorded desktop coordinates. Convert them to the target's
-    current client coordinates so the action still follows a moved window.
-    WM_MOUSEWHEEL's lParam uses screen coordinates, unlike mouse-button messages.
+    WM_MOUSEWHEEL lParam must contain screen coordinates. Do not round-trip
+    through ClientToScreen here: keeping the original screen point avoids DPI /
+    coordinate-virtualization offsets observed in some window configurations.
     """
     def diag(message):
         if callable(log):
@@ -376,43 +376,54 @@ def background_scroll(hwnd, x, y, dy, log=None):
         return False
     user32 = ctypes.windll.user32
     hwnd = int(hwnd)
-    ox, oy = window_client_origin(hwnd)
-    client_x, client_y = int(x) - int(ox), int(y) - int(oy)
-    pt = ctypes.wintypes.POINT(client_x, client_y)
-    if not user32.ClientToScreen(hwnd, ctypes.byref(pt)):
-        diag("백그라운드 휠 실패: ClientToScreen 실패")
-        return False
 
-    # A pynput wheel delta is expressed in notches; Win32 uses WHEEL_DELTA=120.
+    screen_x, screen_y = int(x), int(y)
     delta = int(dy) * 120
     if delta == 0:
+        diag("백그라운드 휠: delta=0이라 입력 생략")
         return True
+
+    # WM_MOUSEWHEEL expects the wheel delta in the high word of wParam and
+    # the cursor's SCREEN position in lParam (unlike WM_LBUTTONDOWN).
     wparam = (delta & 0xFFFF) << 16
-    lparam = ((int(pt.y) & 0xFFFF) << 16) | (int(pt.x) & 0xFFFF)
-    child = user32.ChildWindowFromPointEx(hwnd, ctypes.wintypes.POINT(client_x, client_y), 0)
-    targets = []
-    if child and int(child) != hwnd:
-        targets.append(int(child))
-    targets.append(hwnd)
-    # Post first so the target's own message loop can process the wheel event;
-    # then also try synchronous delivery to each candidate window. API success
-    # only confirms message delivery, not that the game consumed the input.
-    delivered = False
-    for target in targets:
-        try:
-            posted = bool(user32.PostMessageW(target, 0x020A, wparam, lparam))
-            diag(f"백그라운드 휠 PostMessage: HWND={target}, 방향={'위' if delta > 0 else '아래'}, delta={delta}, 화면좌표=({pt.x},{pt.y}), 성공={posted}")
-            delivered = delivered or posted
-        except Exception as e:
-            diag(f"백그라운드 휠 PostMessage 예외 HWND={target}: {type(e).__name__}")
-    for target in targets:
-        try:
-            result = user32.SendMessageW(target, 0x020A, wparam, lparam)
-            diag(f"백그라운드 휠 SendMessage: HWND={target}, delta={delta}, 반환={result} (게임 처리 여부 미확인)")
-            delivered = True
-        except Exception as e:
-            diag(f"백그라운드 휠 SendMessage 예외 HWND={target}: {type(e).__name__}")
-    return delivered
+    lparam = ((screen_y & 0xFFFF) << 16) | (screen_x & 0xFFFF)
+
+    ox, oy = window_client_origin(hwnd)
+    client_x, client_y = screen_x - int(ox), screen_y - int(oy)
+    child = user32.ChildWindowFromPointEx(
+        hwnd, ctypes.wintypes.POINT(client_x, client_y), 0
+    )
+    target = int(child) if child and int(child) != hwnd else hwnd
+    diag(
+        f"백그라운드 휠 대상: topHWND={hwnd}, childHWND={target if target != hwnd else 0}, "
+        f"targetHWND={target}, screen=({screen_x},{screen_y}), "
+        f"client=({client_x},{client_y}), delta={delta}"
+    )
+
+    # Do not send both PostMessage and SendMessage unconditionally: if the
+    # game handles both, one recorded wheel notch can be applied twice.
+    try:
+        posted = bool(user32.PostMessageW(target, 0x020A, wparam, lparam))
+        diag(
+            f"백그라운드 휠 PostMessage: HWND={target}, "
+            f"방향={'위' if delta > 0 else '아래'}, delta={delta}, "
+            f"화면좌표=({screen_x},{screen_y}), 성공={posted}"
+        )
+        if posted:
+            return True
+    except Exception as e:
+        diag(f"백그라운드 휠 PostMessage 예외 HWND={target}: {type(e).__name__}")
+
+    try:
+        result = user32.SendMessageW(target, 0x020A, wparam, lparam)
+        diag(
+            f"백그라운드 휠 SendMessage fallback: HWND={target}, delta={delta}, "
+            f"반환={result} (게임 처리 여부 미확인)"
+        )
+        return True
+    except Exception as e:
+        diag(f"백그라운드 휠 SendMessage 예외 HWND={target}: {type(e).__name__}")
+        return False
 
 
 def grab_window(hwnd):
