@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-09-21-IMGDEBUG-10"
+BUILD_ID = "2026-10-18-WINDOWCAP-01"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -327,8 +327,12 @@ def grab_window(hwnd):
     try:
         ok=False
         if bmp:
-            ok=bool(user32.PrintWindow(hwnd,memdc,2))
-            if not ok: ok=bool(user32.PrintWindow(hwnd,memdc,0))
+            # The bitmap dimensions above are the CLIENT dimensions. Capture the
+            # client area only; PW_RENDERFULLCONTENT/PW flags that include the
+            # non-client frame can shift all template-match coordinates in
+            # windowed mode by the title-bar/border offset.
+            PW_CLIENTONLY = 0x00000001
+            ok=bool(user32.PrintWindow(hwnd,memdc,PW_CLIENTONLY))
         if ok:
             class BITMAPINFOHEADER(ctypes.Structure):
                 _fields_=[('biSize',ctypes.wintypes.DWORD),('biWidth',ctypes.wintypes.LONG),('biHeight',ctypes.wintypes.LONG),('biPlanes',ctypes.wintypes.WORD),('biBitCount',ctypes.wintypes.WORD),('biCompression',ctypes.wintypes.DWORD),('biSizeImage',ctypes.wintypes.DWORD),('biXPelsPerMeter',ctypes.wintypes.LONG),('biYPelsPerMeter',ctypes.wintypes.LONG),('biClrUsed',ctypes.wintypes.DWORD),('biClrImportant',ctypes.wintypes.DWORD)]
@@ -356,8 +360,9 @@ def grab_window(hwnd):
         if hwnddc:
             try: user32.ReleaseDC(hwnd,hwnddc)
             except Exception: pass
-    # Second fallback: BitBlt from the window DC. This can work for
-    # classic/GDI-rendered windows where PrintWindow is unavailable.
+    # Second fallback: GetDC(hwnd) returns the client DC. Copy only the
+    # client-sized area so its origin stays aligned with find_image_background.
+    # This can work for classic/GDI-rendered windows where PrintWindow is unavailable.
     try:
         hwnddc=user32.GetDC(hwnd)
         memdc=gdi32.CreateCompatibleDC(hwnddc) if hwnddc else 0
@@ -973,12 +978,19 @@ class MacroWorker(threading.Thread):
                             break
                         if found:
                             score,x,y,w,h=found
+                            center_x=x+w//2
+                            center_y=y+h//2
+                            self.sig.run.emit(
+                                f"[{now()}] 이미지 인식 좌표 진단: rect=({x},{y},{w},{h}), "
+                                f"center=({center_x},{center_y}), score={score:.3f}, "
+                                f"capture=client-area"
+                            )
                             click_delay=max(0.0,float(getattr(st,'click_delay',0.0)))
                             if click_delay > 0:
                                 self.sig.run.emit(f"[{now()}] 이미지 인식 후 클릭 대기: {click_delay:.2f}초")
                                 self._wait(click_delay)
                                 if self.stop_evt.is_set(): break
-                            cx=x+w//2; cy=y+h//2
+                            cx=center_x; cy=center_y
                             if st.click_mode == 'key':
                                 key_name = str(getattr(st, "input_key", "") or "").strip()
                                 target_is_foreground = False
