@@ -146,6 +146,45 @@ def foreground_window_title():
     user32.GetWindowTextW(hwnd, buf, n+1); return buf.value
 
 
+def background_key(hwnd, key_name):
+    """Send one configured key to the target window without activating it."""
+    if os.name != "nt" or not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
+        return False
+    user32 = ctypes.windll.user32
+    name = str(key_name or "").strip()
+    if not name:
+        return False
+    special = {
+        "ENTER": 0x0D, "RETURN": 0x0D, "TAB": 0x09, "SPACE": 0x20,
+        "BACKSPACE": 0x08, "DELETE": 0x2E, "INSERT": 0x2D,
+        "HOME": 0x24, "END": 0x23, "PAGEUP": 0x21, "PAGEDOWN": 0x22,
+        "LEFT": 0x25, "UP": 0x26, "RIGHT": 0x27, "DOWN": 0x28,
+        "ESC": 0x1B, "ESCAPE": 0x1B,
+    }
+    upper = name.upper().replace(" ", "")
+    if upper in special:
+        vk = special[upper]
+    elif upper.startswith("F") and upper[1:].isdigit() and 1 <= int(upper[1:]) <= 24:
+        vk = 0x70 + int(upper[1:]) - 1
+    elif len(name) == 1:
+        mapped = int(user32.VkKeyScanW(ord(name)))
+        if mapped == -1:
+            return False
+        vk = mapped & 0xFF
+    else:
+        return False
+    scan = int(user32.MapVirtualKeyW(vk, 0))
+    lparam_down = 1 | (scan << 16)
+    lparam_up = lparam_down | (1 << 30) | (1 << 31)
+    try:
+        user32.SendMessageW(int(hwnd), 0x0100, vk, lparam_down)
+        time.sleep(0.025)
+        user32.SendMessageW(int(hwnd), 0x0101, vk, lparam_up)
+        return True
+    except Exception:
+        return False
+
+
 def window_client_origin(hwnd):
     if os.name != 'nt' or not hwnd: return (0,0)
     user32=ctypes.windll.user32; pt=ctypes.wintypes.POINT(0,0)
