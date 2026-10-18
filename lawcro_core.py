@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-19-v06"
+BUILD_ID = "2026-10-19-v07"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -337,11 +337,54 @@ def background_click(hwnd, x, y, log=None):
     try:
         user32.SetCursorPos(int(screen_pt.x), int(screen_pt.y))
         if not target_active:
+            # Some games ignore synthetic WM_* messages while unfocused and read
+            # physical mouse input instead. As an explicit fallback, briefly
+            # foreground the target, inject a real click, then restore focus.
+            previous_foreground = int(user32.GetForegroundWindow() or 0)
+            current_tid = int(ctypes.windll.kernel32.GetCurrentThreadId())
+            target_tid = int(user32.GetWindowThreadProcessId(hwnd, None) or 0)
+            attached = False
+            try:
+                if target_tid and target_tid != current_tid:
+                    attached = bool(user32.AttachThreadInput(current_tid, target_tid, True))
+                user32.BringWindowToTop(hwnd)
+                activated = bool(user32.SetForegroundWindow(hwnd))
+                time.sleep(0.08)
+                actual_foreground = int(user32.GetForegroundWindow() or 0)
+                if activated and (actual_foreground == hwnd or user32.IsChild(hwnd, actual_foreground)):
+                    user32.SetCursorPos(int(screen_pt.x), int(screen_pt.y))
+                    user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
+                    time.sleep(0.06)
+                    user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
+                    time.sleep(0.05)
+                    diag(
+                        f"백그라운드 진단: 비활성 창 실제 클릭 입력 전송 "
+                        f"targetHWND={hwnd}, foregroundHWND={actual_foreground}, "
+                        f"screen=({screen_pt.x},{screen_pt.y}); 입력 직후 이전 포커스 복귀 시도"
+                    )
+                    return True
+                diag(
+                    f"백그라운드 진단: 대상 창 일시 활성화 실패 "
+                    f"targetHWND={hwnd}, requested={activated}, actualForeground={actual_foreground}; "
+                    "메시지 입력 fallback 진행"
+                )
+            except Exception as e:
+                diag(f"백그라운드 진단: 실제 클릭 입력 예외 {type(e).__name__}: {e}")
+            finally:
+                if attached:
+                    try:
+                        user32.AttachThreadInput(current_tid, target_tid, False)
+                    except Exception:
+                        pass
+                if previous_foreground and user32.IsWindow(previous_foreground):
+                    user32.SetForegroundWindow(previous_foreground)
+                if old_pos is not None:
+                    user32.SetCursorPos(old_pos[0], old_pos[1])
             for target, tx, ty in targets:
                 if send_sequence(target, tx, ty):
                     diag(
-                        f"백그라운드 진단: 비활성 창 동기 입력 전달 완료 HWND={target}; "
-                        "실제 게임 처리 여부는 로그만으로 확정할 수 없음"
+                        f"백그라운드 진단: 비활성 창 동기 메시지 전달 완료 HWND={target}; "
+                        "게임 처리 여부는 미확인"
                     )
                     return True
             return False
@@ -424,8 +467,51 @@ def background_scroll(hwnd, x, y, dy, log=None):
             if old_pos is not None:
                 user32.SetCursorPos(old_pos[0], old_pos[1])
 
-    # Inactive windows cannot receive physical input without activating them.
-    # Try the background message path only for an inactive target.
+    # For an inactive game, first test a brief foreground activation and a real
+    # OS wheel event. Restore the previously focused window immediately after.
+    if not target_active:
+        previous_foreground = foreground
+        current_tid = int(ctypes.windll.kernel32.GetCurrentThreadId())
+        target_tid = int(user32.GetWindowThreadProcessId(hwnd, None) or 0)
+        attached = False
+        cursor = ctypes.wintypes.POINT()
+        got_cursor = bool(user32.GetCursorPos(ctypes.byref(cursor)))
+        old_pos = (int(cursor.x), int(cursor.y)) if got_cursor else None
+        try:
+            if target_tid and target_tid != current_tid:
+                attached = bool(user32.AttachThreadInput(current_tid, target_tid, True))
+            user32.BringWindowToTop(hwnd)
+            activated = bool(user32.SetForegroundWindow(hwnd))
+            time.sleep(0.08)
+            actual_foreground = int(user32.GetForegroundWindow() or 0)
+            if activated and (actual_foreground == hwnd or user32.IsChild(hwnd, actual_foreground)):
+                user32.SetCursorPos(screen_x, screen_y)
+                time.sleep(0.03)
+                user32.mouse_event(0x0800, 0, 0, delta, 0)  # MOUSEEVENTF_WHEEL
+                diag(
+                    f"백그라운드 휠 실제 입력: targetHWND={hwnd}, foregroundHWND={actual_foreground}, "
+                    f"방향={'위' if delta > 0 else '아래'}, delta={delta}, screen=({screen_x},{screen_y}); "
+                    "입력 직후 이전 포커스 복귀 시도"
+                )
+                return True
+            diag(
+                f"백그라운드 휠: 대상 창 일시 활성화 실패 targetHWND={hwnd}, "
+                f"requested={activated}, actualForeground={actual_foreground}; 메시지 fallback 진행"
+            )
+        except Exception as e:
+            diag(f"백그라운드 휠 실제 입력 예외: {type(e).__name__}: {e}")
+        finally:
+            if attached:
+                try:
+                    user32.AttachThreadInput(current_tid, target_tid, False)
+                except Exception:
+                    pass
+            if previous_foreground and user32.IsWindow(previous_foreground):
+                user32.SetForegroundWindow(previous_foreground)
+            if old_pos is not None:
+                user32.SetCursorPos(old_pos[0], old_pos[1])
+
+    # If physical input cannot be used, try background WM_MOUSEWHEEL messages.
     try:
         posted = bool(user32.PostMessageW(target, 0x020A, wparam, lparam))
         diag(
