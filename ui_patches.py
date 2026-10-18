@@ -5,7 +5,7 @@ from PySide6.QtWidgets import QHeaderView
 
 # Single source of truth for the build shown by the application event log.
 # main.py assigns this value to lawcro_core.BUILD_ID at startup.
-BUILD_ID = "2026-09-26-GROUP-06"
+BUILD_ID = "2026-10-18-v01"
 
 
 def install(core):

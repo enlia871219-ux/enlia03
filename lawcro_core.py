@@ -146,6 +146,45 @@ def foreground_window_title():
     user32.GetWindowTextW(hwnd, buf, n+1); return buf.value
 
 
+def background_key(hwnd, key_name):
+    """Send one configured key to the target window without activating it."""
+    if os.name != "nt" or not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
+        return False
+    user32 = ctypes.windll.user32
+    name = str(key_name or "").strip()
+    if not name:
+        return False
+    special = {
+        "ENTER": 0x0D, "RETURN": 0x0D, "TAB": 0x09, "SPACE": 0x20,
+        "BACKSPACE": 0x08, "DELETE": 0x2E, "INSERT": 0x2D,
+        "HOME": 0x24, "END": 0x23, "PAGEUP": 0x21, "PAGEDOWN": 0x22,
+        "LEFT": 0x25, "UP": 0x26, "RIGHT": 0x27, "DOWN": 0x28,
+        "ESC": 0x1B, "ESCAPE": 0x1B,
+    }
+    upper = name.upper().replace(" ", "")
+    if upper in special:
+        vk = special[upper]
+    elif upper.startswith("F") and upper[1:].isdigit() and 1 <= int(upper[1:]) <= 24:
+        vk = 0x70 + int(upper[1:]) - 1
+    elif len(name) == 1:
+        mapped = int(user32.VkKeyScanW(ord(name)))
+        if mapped == -1:
+            return False
+        vk = mapped & 0xFF
+    else:
+        return False
+    scan = int(user32.MapVirtualKeyW(vk, 0))
+    lparam_down = 1 | (scan << 16)
+    lparam_up = lparam_down | (1 << 30) | (1 << 31)
+    try:
+        user32.SendMessageW(int(hwnd), 0x0100, vk, lparam_down)
+        time.sleep(0.025)
+        user32.SendMessageW(int(hwnd), 0x0101, vk, lparam_up)
+        return True
+    except Exception:
+        return False
+
+
 def window_client_origin(hwnd):
     if os.name != 'nt' or not hwnd: return (0,0)
     user32=ctypes.windll.user32; pt=ctypes.wintypes.POINT(0,0)
@@ -154,79 +193,76 @@ def window_client_origin(hwnd):
 
 
 def background_click(hwnd, x, y):
-    """Dispatch a Unity click while keeping the target window inactive.
-
-    Mabinogi Mobile appears to consult the real Windows cursor position while
-    handling mouse messages. Therefore, temporarily move the real cursor to
-    the requested client point, synchronously send the mouse messages, then
-    restore the cursor. This never activates the target window.
-    """
-    if os.name != 'nt' or not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
+    """Deliver a click to the Unity render child first, without activating the target."""
+    if os.name != 'nt' or not hwnd:
         return False
-    user32=ctypes.windll.user32
-    hwnd=int(hwnd)
-    x=int(x); y=int(y)
+    user32 = ctypes.windll.user32
+    hwnd = int(hwnd)
+    if not user32.IsWindow(hwnd):
+        return False
+    x, y = int(x), int(y)
     if x < 0 or y < 0:
         return False
 
-    WM_MOUSEMOVE=0x0200
-    WM_LBUTTONDOWN=0x0201
-    WM_LBUTTONUP=0x0202
-    MK_LBUTTON=0x0001
+    WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP = 0x0200, 0x0201, 0x0202
+    MK_LBUTTON = 0x0001
 
-    def pack_xy(px,py):
+    def pack_xy(px, py):
         return ((int(py) & 0xFFFF) << 16) | (int(px) & 0xFFFF)
 
-    def client_to_screen(target, px, py):
-        pt=ctypes.wintypes.POINT(int(px),int(py))
-        if not user32.ClientToScreen(int(target),ctypes.byref(pt)):
-            return None
-        return int(pt.x), int(pt.y)
+    def post_sequence(target, tx, ty):
+        if not target or not user32.IsWindow(target):
+            return False
+        lp = pack_xy(tx, ty)
+        moved = bool(user32.PostMessageW(target, WM_MOUSEMOVE, 0, lp))
+        down = bool(user32.PostMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp))
+        time.sleep(0.025)
+        up = bool(user32.PostMessageW(target, WM_LBUTTONUP, 0, lp))
+        return moved and down and up
 
     def send_sequence(target, tx, ty):
-        lp=pack_xy(tx,ty)
+        if not target or not user32.IsWindow(target):
+            return False
+        lp = pack_xy(tx, ty)
         try:
-            user32.SendMessageW(target,WM_MOUSEMOVE,0,lp)
-            user32.SendMessageW(target,WM_LBUTTONDOWN,MK_LBUTTON,lp)
-            user32.SendMessageW(target,WM_LBUTTONUP,0,lp)
+            user32.SendMessageW(target, WM_MOUSEMOVE, 0, lp)
+            user32.SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp)
+            time.sleep(0.025)
+            user32.SendMessageW(target, WM_LBUTTONUP, 0, lp)
             return True
         except Exception:
             return False
 
-    cursor=ctypes.wintypes.POINT()
-    if not user32.GetCursorPos(ctypes.byref(cursor)):
+    # Resolve the render/input child before sending anything: SendMessage to the
+    # top-level HWND can succeed technically while Unity ignores the click.
+    screen_pt = ctypes.wintypes.POINT(x, y)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(screen_pt)):
         return False
-    old_x,old_y=int(cursor.x),int(cursor.y)
+    child = user32.ChildWindowFromPointEx(hwnd, ctypes.wintypes.POINT(x, y), 0)
+    targets = []
+    if child and int(child) != hwnd:
+        child = int(child)
+        child_pt = ctypes.wintypes.POINT(screen_pt.x, screen_pt.y)
+        if user32.ScreenToClient(child, ctypes.byref(child_pt)):
+            targets.append((child, int(child_pt.x), int(child_pt.y)))
+    targets.append((hwnd, x, y))
 
-    # First try the selected Unity player HWND.
-    screen=client_to_screen(hwnd,x,y)
-    if screen is not None:
-        try:
-            if user32.SetCursorPos(screen[0],screen[1]):
-                if send_sequence(hwnd,x,y):
-                    time.sleep(0.03)
-                    return True
-        finally:
-            user32.SetCursorPos(old_x,old_y)
-
-    # Fallback for a separate child render/input window.
-    child=user32.ChildWindowFromPointEx(
-        hwnd,ctypes.wintypes.POINT(x,y),0
-    )
-    if child and int(child)!=hwnd:
-        child=int(child)
-        screen=client_to_screen(hwnd,x,y)
-        if screen is not None:
-            child_pt=ctypes.wintypes.POINT(screen[0],screen[1])
-            if user32.ScreenToClient(child,ctypes.byref(child_pt)):
-                try:
-                    if user32.SetCursorPos(screen[0],screen[1]):
-                        if send_sequence(child,int(child_pt.x),int(child_pt.y)):
-                            time.sleep(0.03)
-                            return True
-                finally:
-                    user32.SetCursorPos(old_x,old_y)
-    return False
+    # Queue the click to the render child first, then try synchronous delivery.
+    # Keep the cursor at the requested screen point while the messages are sent.
+    cursor = ctypes.wintypes.POINT()
+    got_cursor = bool(user32.GetCursorPos(ctypes.byref(cursor)))
+    old_pos = (int(cursor.x), int(cursor.y)) if got_cursor else None
+    try:
+        user32.SetCursorPos(int(screen_pt.x), int(screen_pt.y))
+        for target, tx, ty in targets:
+            if post_sequence(target, tx, ty):
+                return True
+            if send_sequence(target, tx, ty):
+                return True
+        return False
+    finally:
+        if old_pos is not None:
+            user32.SetCursorPos(old_pos[0], old_pos[1])
 
 def grab_window(hwnd):
     """Capture the client area with PrintWindow, then fall back to MSS for GPU-rendered windows."""
@@ -377,6 +413,8 @@ class Step:
     click_mode: str = "center"
     click_x: int = 0
     click_y: int = 0
+    click_absolute: bool = False  # selected desktop screen position
+    input_key: str = ""
     enabled: bool = True
     failure_action: str = "retry"  # retry / ignore / goto
     retry_count: int = 3
@@ -512,11 +550,24 @@ class StepEditor(QDialog):
         self.image_wait = QDoubleSpinBox(); self.image_wait.setRange(.1, 3600); self.image_wait.setDecimals(2); self.image_wait.setSingleStep(.1); self.image_wait.setValue(getattr(step, 'image_wait', 10.0))
         self.click_delay = QDoubleSpinBox(); self.click_delay.setRange(0, 3600); self.click_delay.setDecimals(2); self.click_delay.setSingleStep(.1); self.click_delay.setValue(getattr(step, 'click_delay', 0.0))
         self.acc = QDoubleSpinBox(); self.acc.setRange(.01, 1.0); self.acc.setDecimals(2); self.acc.setSingleStep(.01); self.acc.setValue(step.accuracy)
-        self.click = QComboBox(); self.click.addItems(["이미지 중앙", "직접 지정"]); self.click.setCurrentIndex(0 if step.click_mode=='center' else 1)
+        self.click = QComboBox(); self.click.addItems(["이미지 중앙", "직접 지정", "키 입력 : 비활성화모드 사용 불가"])
+        self.click.setCurrentIndex({"center": 0, "offset": 1, "key": 2}.get(step.click_mode, 0))
         self.cx = QSpinBox(); self.cx.setRange(-10000,10000); self.cx.setValue(step.click_x)
         self.cy = QSpinBox(); self.cy.setRange(-10000,10000); self.cy.setValue(step.click_y)
+        self.input_key = str(getattr(step, "input_key", "") or "")
+        self.click_absolute = bool(getattr(step, "click_absolute", False))
+        self.key_button = QPushButton(f"현재 입력 키 : {self.input_key}" if self.input_key else "클릭 후 원하는 키 입력")
+        self.key_button.clicked.connect(self.capture_input_key)
         info.addRow("이름", self.name); info.addRow("대기시간(초)", self.wait); info.addRow("이미지 대기(초)", self.image_wait); info.addRow("이미지 정확도", self.acc); info.addRow("클릭 위치", self.click)
         xy = QHBoxLayout(); xy.addWidget(self.cx); xy.addWidget(QLabel(",")); xy.addWidget(self.cy); xyw=QWidget(); xyw.setLayout(xy); info.addRow("상대 위치 X,Y", xyw)
+        key_row = QHBoxLayout(); key_row.addWidget(self.key_button); key_row.addStretch(1); key_widget = QWidget(); key_widget.setLayout(key_row)
+        key_label = QWidget()
+        key_label_layout = QVBoxLayout(key_label); key_label_layout.setContentsMargins(0, 0, 0, 0); key_label_layout.setSpacing(2)
+        key_label_title = QLabel("입력 키 설정")
+        key_label_warning = QLabel("※ 비활성화 모드 사용 불가")
+        key_label_warning.setStyleSheet("color: red; font-weight: bold;")
+        key_label_layout.addWidget(key_label_title); key_label_layout.addWidget(key_label_warning)
+        info.addRow(key_label, key_widget)
         info.addRow("인식 후 클릭 실행 대기(초)", self.click_delay)
         self.region_label = QLabel(self._region_text()); info.addRow("검색 영역", self.region_label)
         btn_region = QPushButton("화면에서 검색영역 지정")
@@ -593,17 +644,45 @@ class StepEditor(QDialog):
         pm=image_to_qpixmap(self.step.path, QSize(420,250)) if self.step.path else QPixmap()
         self.preview.setPixmap(pm if not pm.isNull() else QPixmap());
         if pm.isNull(): self.preview.setText("미리볼 이미지가 없습니다")
+    def capture_input_key(self):
+        self.key_button.setText("키 입력 대기 중... (취소: Esc)")
+        self.key_button.setFocus()
+        self.grabKeyboard()
+        self._capturing_input_key = True
+
+    def keyPressEvent(self, event):
+        if getattr(self, "_capturing_input_key", False):
+            from PySide6.QtGui import QKeySequence
+            if event.key() == Qt.Key_Escape:
+                self._capturing_input_key = False
+                self.releaseKeyboard()
+                self.key_button.setText(f"현재 입력 키 : {self.input_key}" if self.input_key else "클릭 후 원하는 키 입력")
+                return
+            if event.key() in (Qt.Key_Shift, Qt.Key_Control, Qt.Key_Alt, Qt.Key_Meta):
+                return
+            key_name = QKeySequence(event.key()).toString()
+            if key_name:
+                self.input_key = key_name
+                self.key_button.setText(f"현재 입력 키 : {key_name}")
+            self._capturing_input_key = False
+            self.releaseKeyboard()
+            return
+        super().keyPressEvent(event)
+
     def _click_changed(self):
-        en=self.click.currentIndex()==1; self.cx.setEnabled(en); self.cy.setEnabled(en)
+        mode = self.click.currentIndex()
+        self.cx.setEnabled(mode == 1); self.cy.setEnabled(mode == 1)
+        self.key_button.setEnabled(mode == 2)
     def pick_region(self):
         self.selector=RegionSelector('region', self); self.selector.selected.connect(self.region_done); self.selector.show()
     def region_done(self, r): self.step.region=list(map(int,r)); self.region_label.setText(self._region_text())
     def pick_click(self):
         self.selector=RegionSelector('click', self); self.selector.selected.connect(self.click_done); self.selector.show()
     def click_done(self, p):
-        r=self.step.region
-        if r[2]: self.cx.setValue(p[0]-r[0]); self.cy.setValue(p[1]-r[1])
-        else: self.cx.setValue(p[0]); self.cy.setValue(p[1])
+        # The picker returns desktop screen coordinates. Convert to target-client
+        # coordinates immediately before dispatching the click.
+        self.cx.setValue(int(p[0])); self.cy.setValue(int(p[1]))
+        self.click_absolute = True
         self.click.setCurrentIndex(1)
     def _failure_changed(self):
         retry = self.fail_action.currentIndex() == 0
@@ -614,7 +693,8 @@ class StepEditor(QDialog):
         self.fail_target.setToolTip("‘특정 단계로 이동’에서만 수정할 수 있습니다." if not goto else "")
     def accept(self):
         self.step.name=self.name.text().strip() or Path(self.step.path).name
-        self.step.wait=self.wait.value(); self.step.image_wait=self.image_wait.value(); self.step.click_delay=self.click_delay.value(); self.step.accuracy=self.acc.value(); self.step.click_mode='center' if self.click.currentIndex()==0 else 'offset'; self.step.click_x=self.cx.value(); self.step.click_y=self.cy.value()
+        self.step.wait=self.wait.value(); self.step.image_wait=self.image_wait.value(); self.step.click_delay=self.click_delay.value(); self.step.accuracy=self.acc.value(); self.step.click_mode=['center','offset','key'][self.click.currentIndex()]; self.step.click_x=self.cx.value(); self.step.click_y=self.cy.value(); self.step.input_key=self.input_key; self.step.click_absolute=self.click_absolute
+        if self.click.currentIndex()!=1: self.step.click_absolute=False
         self.step.failure_action = ['retry','ignore','goto'][self.fail_action.currentIndex()]
         self.step.retry_count = self.retry_count.value()
         self.step.retry_delay = self.retry_delay.value()
@@ -676,6 +756,7 @@ class MacroWorker(threading.Thread):
         self.stop_evt=threading.Event(); self.pause_evt=threading.Event(); self.pause_evt.set(); self.advance_evt=threading.Event(); self.idx=0
         self.step_lock=threading.Lock(); self.step_request=None
         self.mouse=mouse.Controller()
+        self.keyb=keyboard.Controller()
         self.background=bool(self.settings.get("background", False))
         self.target_title=str(self.settings.get("target_title", ""))
         self.target_process=str(self.settings.get("target_process", ""))
@@ -852,17 +933,64 @@ class MacroWorker(threading.Thread):
                                 self._wait(click_delay)
                                 if self.stop_evt.is_set(): break
                             cx=x+w//2; cy=y+h//2
-                            if st.click_mode=='offset': cx=x+st.click_x; cy=y+st.click_y
-                            if self.background:
-                                if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
-                                clicked=background_click(self.target_hwnd, cx, cy)
-                                if clicked:
-                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 입력 전송 ({cx},{cy})")
+                            if st.click_mode == 'key':
+                                key_name = str(getattr(st, "input_key", "") or "").strip()
+                                target_is_foreground = False
+                                if self.target_hwnd and os.name == "nt":
+                                    user32 = ctypes.windll.user32
+                                    fg = int(user32.GetForegroundWindow() or 0)
+                                    target_is_foreground = bool(fg and (fg == int(self.target_hwnd) or user32.IsChild(int(self.target_hwnd), fg)))
+                                if self.background and not target_is_foreground:
+                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 키 입력 생략 (비활성화 모드에서는 키 입력 불가)")
+                                elif key_name:
+                                    try:
+                                        key_obj = getattr(keyboard.Key, key_name.lower(), None)
+                                        if key_obj is None:
+                                            key_obj = key_name.lower() if len(key_name) == 1 else None
+                                        if key_obj is not None:
+                                            self.keyb.press(key_obj); self.keyb.release(key_obj)
+                                            self.sig.run.emit(f"[{now()}] 입력 키 {key_name}: 전송 완료")
+                                        else:
+                                            self.sig.run.emit(f"[{now()}] 입력 키 {key_name}: 지원하지 않는 키")
+                                    except Exception as e:
+                                        self.sig.run.emit(f"[{now()}] 입력 키 {key_name}: 전송 실패 ({type(e).__name__})")
                                 else:
-                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 백그라운드 입력 전송 실패 ({cx},{cy})")
+                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 키 입력 모드 (입력 키 미설정)")
                             else:
-                                self.mouse.position=(cx,cy); self.mouse.click(mouse.Button.left)
-                                self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 클릭 ({cx},{cy})")
+                                if st.click_mode == 'offset':
+                                    if getattr(st, "click_absolute", False):
+                                        if self.background:
+                                            if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
+                                            ox,oy=window_client_origin(self.target_hwnd)
+                                            cx=int(st.click_x)-ox; cy=int(st.click_y)-oy
+                                        else:
+                                            cx=int(st.click_x); cy=int(st.click_y)
+                                    else:
+                                        cx=x+st.click_x; cy=y+st.click_y
+
+                                if self.background:
+                                    if not self.target_hwnd: self.target_hwnd=find_window_by_title(self.target_title, self.target_process)
+                                    target_is_foreground = False
+                                    if self.target_hwnd and os.name == "nt":
+                                        user32 = ctypes.windll.user32
+                                        fg = int(user32.GetForegroundWindow() or 0)
+                                        target_is_foreground = bool(fg and (fg == int(self.target_hwnd) or user32.IsChild(int(self.target_hwnd), fg)))
+                                    if target_is_foreground:
+                                        # Active target: preserve the original physical cursor move + click behavior.
+                                        ox, oy = window_client_origin(self.target_hwnd)
+                                        sx, sy = ox + int(cx), oy + int(cy)
+                                        self.mouse.position = (sx, sy)
+                                        self.mouse.click(mouse.Button.left)
+                                        self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 활성 대상 창 클릭 ({sx},{sy})")
+                                    else:
+                                        click_succeeded = background_click(self.target_hwnd, cx, cy)
+                                        if click_succeeded:
+                                            self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 비활성 창 클릭 메시지 전송 ({cx},{cy})")
+                                        else:
+                                            self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 비활성 창 클릭 메시지 전송 실패 ({cx},{cy})")
+                                else:
+                                    self.mouse.position=(cx,cy); self.mouse.click(mouse.Button.left)
+                                    self.sig.run.emit(f"[{now()}] 이미지 인식 성공: {st.name} ({score:.2f}) → 클릭 ({cx},{cy})")
                     self._wait(st.wait)
                     i = next_i
                 count+=1
