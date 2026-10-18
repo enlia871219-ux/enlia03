@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-19-v14"
+BUILD_ID = "2026-10-19-v15"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -379,11 +379,11 @@ def background_click(hwnd, x, y, log=None):
             user32.SetCursorPos(old_pos[0], old_pos[1])
 
 def background_scroll(hwnd, x, y, dy, log=None):
-    """Deliver a wheel message to the target's actual window under the recorded point.
+    """Send a background wheel message to the target's existing focus/input HWND.
 
-    This path deliberately does not focus, activate, or raise the target window.
-    Some games ignore synthetic wheel messages entirely; API success is not proof
-    that the game consumed the event.
+    Never changes foreground, activation, or focus. WM_MOUSEWHEEL is normally
+    delivered to the focus window, so inspect the target GUI thread before
+    falling back to the child beneath the recorded screen point or top-level HWND.
     """
     def diag(message):
         if callable(log):
@@ -409,26 +409,85 @@ def background_scroll(hwnd, x, y, dy, log=None):
     WM_MOUSEMOVE = 0x0200
     WM_MOUSEWHEEL = 0x020A
     wparam = (delta & 0xFFFF) << 16
+    # WM_MOUSEWHEEL lParam coordinates are screen coordinates, not client coords.
     wheel_lparam = ((screen_y & 0xFFFF) << 16) | (screen_x & 0xFFFF)
+
+    # Find the HWND that the target GUI thread currently regards as its focus
+    # window. This is read-only: it does not set focus or activate the target.
+    class GUITHREADINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", ctypes.wintypes.DWORD),
+            ("flags", ctypes.wintypes.DWORD),
+            ("hwndActive", ctypes.wintypes.HWND),
+            ("hwndFocus", ctypes.wintypes.HWND),
+            ("hwndCapture", ctypes.wintypes.HWND),
+            ("hwndMenuOwner", ctypes.wintypes.HWND),
+            ("hwndMoveSize", ctypes.wintypes.HWND),
+            ("hwndCaret", ctypes.wintypes.HWND),
+            ("rcCaret", ctypes.wintypes.RECT),
+        ]
+
+    pid = ctypes.wintypes.DWORD()
+    thread_id = int(user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)) or 0)
+    gui = GUITHREADINFO()
+    gui.cbSize = ctypes.sizeof(GUITHREADINFO)
+    got_gui = bool(thread_id and user32.GetGUIThreadInfo(thread_id, ctypes.byref(gui)))
+    focus_hwnd = int(gui.hwndFocus or 0) if got_gui else 0
+    active_hwnd = int(gui.hwndActive or 0) if got_gui else 0
+    capture_hwnd = int(gui.hwndCapture or 0) if got_gui else 0
+
+    # Only accept the focus HWND if it belongs to the selected game window.
+    focus_is_target = bool(
+        focus_hwnd and user32.IsWindow(focus_hwnd)
+        and (focus_hwnd == hwnd or user32.IsChild(hwnd, focus_hwnd))
+    )
 
     ox, oy = window_client_origin(hwnd)
     client_x, client_y = screen_x - int(ox), screen_y - int(oy)
     child = user32.ChildWindowFromPointEx(
         hwnd, ctypes.wintypes.POINT(client_x, client_y), 0
     )
-    target = int(child) if child and int(child) != hwnd else hwnd
-    target_x, target_y = client_x, client_y
-    if target != hwnd:
-        child_pt = ctypes.wintypes.POINT(screen_x, screen_y)
-        if user32.ScreenToClient(target, ctypes.byref(child_pt)):
-            target_x, target_y = int(child_pt.x), int(child_pt.y)
+    point_child = int(child) if child and int(child) != hwnd else 0
+
+    # WM_MOUSEWHEEL is specified for the focus window. Prefer that HWND; if
+    # the target thread exposes no valid focus child, use the point child,
+    # then the top-level window. No focus/activation API is called.
+    if focus_is_target:
+        target = focus_hwnd
+        target_source = "thread-focus"
+    elif point_child:
+        target = point_child
+        target_source = "point-child"
+    else:
+        target = hwnd
+        target_source = "top-level"
+
+    target_x, target_y = screen_x, screen_y
+    target_pt = ctypes.wintypes.POINT(screen_x, screen_y)
+    if user32.ScreenToClient(target, ctypes.byref(target_pt)):
+        target_x, target_y = int(target_pt.x), int(target_pt.y)
 
     foreground = int(user32.GetForegroundWindow() or 0)
     target_active = foreground == hwnd or bool(user32.IsChild(hwnd, foreground))
+
+    def class_name(handle):
+        if not handle:
+            return "-"
+        buf = ctypes.create_unicode_buffer(256)
+        try:
+            user32.GetClassNameW(handle, buf, len(buf))
+            return buf.value or "?"
+        except Exception:
+            return "?"
+
     diag(
-        f"백그라운드 휠 대상: topHWND={hwnd}, childHWND={target if target != hwnd else 0}, "
-        f"targetHWND={target}, screen=({screen_x},{screen_y}), "
-        f"targetClient=({target_x},{target_y}), delta={delta}, active={target_active}"
+        f"백그라운드 휠 대상 v15: topHWND={hwnd}, thread={thread_id}, "
+        f"focusHWND={focus_hwnd}, focusClass={class_name(focus_hwnd)}, "
+        f"activeHWND={active_hwnd}, captureHWND={capture_hwnd}, "
+        f"pointChildHWND={point_child}, targetHWND={target}, "
+        f"targetClass={class_name(target)}, source={target_source}, "
+        f"screen=({screen_x},{screen_y}), targetClient=({target_x},{target_y}), "
+        f"delta={delta}, foreground={foreground}, active={target_active}"
     )
 
     if target_active:
@@ -451,22 +510,20 @@ def background_scroll(hwnd, x, y, dy, log=None):
             if old_pos is not None:
                 user32.SetCursorPos(old_pos[0], old_pos[1])
 
-    # v14: target the render/input child when one exists. The previous version
-    # detected this child but still sent every message to the top-level HWND.
-    # Do not call SetFocus/AttachThreadInput/SetForegroundWindow: the game must
-    # remain in the background.
     try:
+        # Send to the existing focus HWND when available. Do not synthesize
+        # WM_SETFOCUS/WM_ACTIVATE and do not raise the game window.
         move_lparam = ((target_y & 0xFFFF) << 16) | (target_x & 0xFFFF)
         user32.SendMessageW(target, WM_MOUSEMOVE, 0, move_lparam)
         result = user32.SendMessageW(target, WM_MOUSEWHEEL, wparam, wheel_lparam)
         diag(
-            f"백그라운드 휠 v14: SendMessage 대상HWND={target}, topHWND={hwnd}, "
+            f"백그라운드 휠 v15: SendMessage 대상HWND={target}, source={target_source}, "
             f"결과={result}, 방향={'위' if delta > 0 else '아래'}, delta={delta}; "
             "창 활성화/포커스 변경 API 미사용; 게임 처리 여부는 미확인"
         )
         return True
     except Exception as e:
-        diag(f"백그라운드 휠 v14 예외 HWND={target}: {type(e).__name__}: {e}")
+        diag(f"백그라운드 휠 v15 예외 HWND={target}: {type(e).__name__}: {e}")
         return False
 
 def grab_window(hwnd):
@@ -1011,7 +1068,8 @@ class MacroWorker(threading.Thread):
     def run(self):
         mode=self.settings['mode']; repeat=self.settings['repeat']; until=time.monotonic()+self.settings['minutes']*60 if mode=='time' else None; count=0
         self.sig.run.emit(f"[{now()}] 재생 시작 [BUILD {BUILD_ID}]")
-        self.sig.run.emit(f"[{now()}] Worker 코드 확인: 이미지 인식 진단 버전")
+        self.sig.run.emit(f"[{now()}] 빌드 진단: BUILD_ID={BUILD_ID}, 실행파일={Path(sys.executable).name}, 모듈={Path(__file__).name}")
+        self.sig.run.emit(f"[{now()}] Worker 코드 확인: 이미지 인식 진단 버전 [BUILD {BUILD_ID}]")
         if self.background:
             self.sig.run.emit(f"[{now()}] 백그라운드 대상 고정: HWND={self.target_hwnd}, 창={self.target_title}, 프로세스={self.target_process}")
         try:
