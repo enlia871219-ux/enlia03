@@ -280,10 +280,10 @@ def background_click(hwnd, x, y, log=None):
         moved = bool(user32.PostMessageW(target, WM_MOUSEMOVE, 0, lp))
         down = bool(user32.PostMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp))
         # Shortened click hold/settle delays for faster cursor return.
-        time.sleep(0.03)
+        time.sleep(0.01)
         up = bool(user32.PostMessageW(target, WM_LBUTTONUP, 0, lp))
         time.sleep(0.015)
-        diag(f"백그라운드 진단: PostMessage HWND={int(target)} 좌표=({tx},{ty}) move={moved} down={down} up={up} hold=30ms settle=15ms")
+        diag(f"백그라운드 진단: PostMessage HWND={int(target)} 좌표=({tx},{ty}) move={moved} down={down} up={up} hold=10ms settle=15ms")
         return moved and down and up
 
     WM_ACTIVATE, WM_SETFOCUS, WM_KILLFOCUS = 0x0006, 0x0007, 0x0008
@@ -302,14 +302,14 @@ def background_click(hwnd, x, y, log=None):
                 time.sleep(0.005)
             user32.SendMessageW(target, WM_MOUSEMOVE, 0, lp)
             user32.SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp)
-            time.sleep(0.03)
+            time.sleep(0.01)
             user32.SendMessageW(target, WM_LBUTTONUP, 0, lp)
             time.sleep(0.005)
             if focus_hint:
                 user32.SendMessageW(target, WM_KILLFOCUS, 0, 0)
                 user32.SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0)
                 diag(f"백그라운드 실험: WM_KILLFOCUS/WM_ACTIVATE(WA_INACTIVE) 종료 top={hwnd}, target={target}")
-            diag(f"백그라운드 진단: SendMessage HWND={int(target)} 좌표=({tx},{ty}) 호출 완료 hold=30ms focus_hint={focus_hint} (게임 처리 여부는 별도)")
+            diag(f"백그라운드 진단: SendMessage HWND={int(target)} 좌표=({tx},{ty}) 호출 완료 hold=10ms focus_hint={focus_hint} (게임 처리 여부는 별도)")
             return True
         except Exception as e:
             if focus_hint:
