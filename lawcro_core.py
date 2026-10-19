@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-19-v15"
+BUILD_ID = "2026-10-19-v16"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -481,7 +481,7 @@ def background_scroll(hwnd, x, y, dy, log=None):
             return "?"
 
     diag(
-        f"백그라운드 휠 대상 v15: topHWND={hwnd}, thread={thread_id}, "
+        f"백그라운드 휠 대상 v16: topHWND={hwnd}, thread={thread_id}, "
         f"focusHWND={focus_hwnd}, focusClass={class_name(focus_hwnd)}, "
         f"activeHWND={active_hwnd}, captureHWND={capture_hwnd}, "
         f"pointChildHWND={point_child}, targetHWND={target}, "
@@ -511,19 +511,21 @@ def background_scroll(hwnd, x, y, dy, log=None):
                 user32.SetCursorPos(old_pos[0], old_pos[1])
 
     try:
-        # Send to the existing focus HWND when available. Do not synthesize
-        # WM_SETFOCUS/WM_ACTIVATE and do not raise the game window.
+        # Queue messages for the target window's normal message loop. Unlike
+        # SendMessage, PostMessage does not call the target WndProc inline.
+        # Never synthesize WM_SETFOCUS/WM_ACTIVATE or raise the game window.
         move_lparam = ((target_y & 0xFFFF) << 16) | (target_x & 0xFFFF)
-        user32.SendMessageW(target, WM_MOUSEMOVE, 0, move_lparam)
-        result = user32.SendMessageW(target, WM_MOUSEWHEEL, wparam, wheel_lparam)
+        move_queued = bool(user32.PostMessageW(target, WM_MOUSEMOVE, 0, move_lparam))
+        wheel_queued = bool(user32.PostMessageW(target, WM_MOUSEWHEEL, wparam, wheel_lparam))
         diag(
-            f"백그라운드 휠 v15: SendMessage 대상HWND={target}, source={target_source}, "
-            f"결과={result}, 방향={'위' if delta > 0 else '아래'}, delta={delta}; "
-            "창 활성화/포커스 변경 API 미사용; 게임 처리 여부는 미확인"
+            f"백그라운드 휠 v16: PostMessage 대상HWND={target}, source={target_source}, "
+            f"WM_MOUSEMOVE_queued={move_queued}, WM_MOUSEWHEEL_queued={wheel_queued}, "
+            f"방향={'위' if delta > 0 else '아래'}, delta={delta}; "
+            "창 활성화/포커스 변경 API 미사용; 큐 등록 성공은 게임 처리 완료를 보장하지 않음"
         )
-        return True
+        return move_queued and wheel_queued
     except Exception as e:
-        diag(f"백그라운드 휠 v15 예외 HWND={target}: {type(e).__name__}: {e}")
+        diag(f"백그라운드 휠 v16 예외 HWND={target}: {type(e).__name__}: {e}")
         return False
 
 def grab_window(hwnd):
