@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 APP_NAME = "ShadeLawcro V1.0 - 이미지 매크로"
-BUILD_ID = "2026-10-20-v17"
+BUILD_ID = "2026-10-20-v18"
 # In a one-file PyInstaller build, bundled assets live in the temporary
 # extraction directory, while user data should stay beside the EXE.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -279,13 +279,11 @@ def background_click(hwnd, x, y, log=None):
         lp = pack_xy(tx, ty)
         moved = bool(user32.PostMessageW(target, WM_MOUSEMOVE, 0, lp))
         down = bool(user32.PostMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp))
-        # Some games sample the real cursor position while processing queued
-        # input. Hold the button longer and leave the cursor at the target until
-        # the queued down/up messages have had time to be processed.
-        time.sleep(0.06)
-        up = bool(user32.PostMessageW(target, WM_LBUTTONUP, 0, lp))
+        # Shortened click hold/settle delays for faster cursor return.
         time.sleep(0.03)
-        diag(f"백그라운드 진단: PostMessage HWND={int(target)} 좌표=({tx},{ty}) move={moved} down={down} up={up} hold=60ms settle=30ms")
+        up = bool(user32.PostMessageW(target, WM_LBUTTONUP, 0, lp))
+        time.sleep(0.015)
+        diag(f"백그라운드 진단: PostMessage HWND={int(target)} 좌표=({tx},{ty}) move={moved} down={down} up={up} hold=30ms settle=15ms")
         return moved and down and up
 
     WM_ACTIVATE, WM_SETFOCUS, WM_KILLFOCUS = 0x0006, 0x0007, 0x0008
@@ -301,17 +299,17 @@ def background_click(hwnd, x, y, log=None):
                 user32.SendMessageW(hwnd, WM_ACTIVATE, WA_ACTIVE, 0)
                 user32.SendMessageW(target, WM_SETFOCUS, 0, 0)
                 diag(f"백그라운드 실험: WM_ACTIVATE/WM_SETFOCUS 전송 top={hwnd}, target={target}; 실제 foreground 변경 없음")
-                time.sleep(0.01)
+                time.sleep(0.005)
             user32.SendMessageW(target, WM_MOUSEMOVE, 0, lp)
             user32.SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, lp)
-            time.sleep(0.06)
+            time.sleep(0.03)
             user32.SendMessageW(target, WM_LBUTTONUP, 0, lp)
-            time.sleep(0.01)
+            time.sleep(0.005)
             if focus_hint:
                 user32.SendMessageW(target, WM_KILLFOCUS, 0, 0)
                 user32.SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0)
                 diag(f"백그라운드 실험: WM_KILLFOCUS/WM_ACTIVATE(WA_INACTIVE) 종료 top={hwnd}, target={target}")
-            diag(f"백그라운드 진단: SendMessage HWND={int(target)} 좌표=({tx},{ty}) 호출 완료 hold=60ms focus_hint={focus_hint} (게임 처리 여부는 별도)")
+            diag(f"백그라운드 진단: SendMessage HWND={int(target)} 좌표=({tx},{ty}) 호출 완료 hold=30ms focus_hint={focus_hint} (게임 처리 여부는 별도)")
             return True
         except Exception as e:
             if focus_hint:
